@@ -13,7 +13,7 @@ Intelligent AI coding assistant with:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
-cp .env .env.local  # edit LLM_API_KEY
+pip install -e
+put your LLM_API_KEY
 python scripts/seed_humaneval.py
 streamlit run app/main.py
