@@ -158,6 +158,10 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+*.py[cod]
+.idea/
+.DS_Store
+.venv/
 
 # Spyder project settings
 .spyderproject
@@ -218,3 +222,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+data/chroma/
+data/sessions.db
+data/uploads/
