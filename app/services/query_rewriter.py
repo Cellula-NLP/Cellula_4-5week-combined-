@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -10,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 # A query of at least this many words is treated as standalone.
 _MIN_STANDALONE_WORDS = 12
+
+# Below this many words, we add a domain hint to improve retrieval.
+_SHORT_QUERY_WORDS = 6
 
 # Max chars of prior context to include.
 _MAX_CONTEXT_CHARS = 400
@@ -25,30 +27,63 @@ _FOLLOWUP_MARKERS = (
 
 
 class QueryRewriter:
-    """Expand short follow-up queries with context from memory."""
+    """Expand short follow-up queries with context from memory.
+
+    Two enrichment strategies:
+      1. Follow-ups ("now add error handling") → prepend prior user message.
+      2. Short standalone queries → prepend a language-aware hint
+         (uses the classifier's detected language, not a hardcoded one).
+    """
 
     def __init__(self, memory, history_window: int = 6) -> None:
         self._memory = memory
         self._window = history_window
 
-    def rewrite(self, session_id: str, query: str) -> str:
-        """Return an enriched query suitable for vector retrieval."""
+    def rewrite(
+        self,
+        session_id: str,
+        query: str,
+        language: str | None = None,
+    ) -> str:
+        """Return an enriched query suitable for vector retrieval.
+
+        ``language`` comes from the classifier (e.g. "python", "javascript").
+        It's used to hint the retrieval, not to force a language.
+        """
         query = (query or "").strip()
         if not query:
             return query
 
-        if self._is_standalone(query):
-            return query
+        # ── Follow-up path: prepend the previous user turn ──
+        if not self._is_standalone(query):
+            prior = self._prior_user_message(session_id, query)
+            if prior:
+                enriched = f"{prior} — {query}"
+                logger.info("Rewrote follow-up: %r", enriched[:120])
+                return enriched
+            # No prior context — fall through to short-query handling.
 
-        prior = self._prior_user_message(session_id, query)
-        if not prior:
-            return query
+        # ── Short-query path: add a language hint if we know one ──
+        if len(query.split()) < _SHORT_QUERY_WORDS:
+            hinted = self._add_domain_hint(query, language)
+            if hinted != query:
+                logger.info("Enriched short query: %r", hinted)
+            return hinted
 
-        enriched = f"{prior} — {query}"
-        logger.info("Rewrote follow-up: %r", enriched[:120])
-        return enriched
+        return query
 
     # ── Internals ──────────────────────────────────
+
+    @staticmethod
+    def _add_domain_hint(query: str, language: str | None) -> str:
+        """Prefix the query with a light domain hint.
+
+        Uses the detected language if available; otherwise a generic
+        'code' hint. Never hardcodes Python.
+        """
+        if language:
+            return f"{language} code: {query}"
+        return f"code: {query}"
 
     @staticmethod
     def _is_standalone(query: str) -> bool:
@@ -64,7 +99,6 @@ class QueryRewriter:
         user_msgs = [m for m in history if m.role == MessageRole.USER]
         if not user_msgs:
             return None
-        # The current query is already stored — skip it.
         for m in reversed(user_msgs):
             if m.content.strip() != current.strip():
                 return m.content[:_MAX_CONTEXT_CHARS]

@@ -47,7 +47,9 @@ class GeneratePipeline(Pipeline):
         context: PipelineContext,
     ) -> AsyncIterator[StreamEvent]:
         # ── 1) Rewrite follow-ups using memory ────
-        retrieval_query = self._rewriter.rewrite(session_id, query)
+        retrieval_query = self._rewriter.rewrite(
+            session_id, query, language=context.language,
+        )
         yield StreamEvent.meta({"stage": "rewritten_query", "value": retrieval_query})
 
         # ── 2) Retrieve from Chroma ───────────────

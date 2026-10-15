@@ -20,22 +20,23 @@ _LANGUAGES = [
 
 def render_memory_popover(memory) -> None:
     """Render the memory popover (triggered from the header)."""
-    with st.popover("🧠", help="Session memory"):
+    # Clean, neutral icon — no brain emoji. The gear suggests "preferences",
+    # which is exactly what this panel lets the user edit.
+    with st.popover("⚙", help="Session memory & preferences"):
         sid = st.session_state.get("session_id", "")
         msgs = st.session_state.get("messages", [])
         profile = memory.profile(sid) if sid else {}
 
         # ── Title ────────────────────────────────
-        st.markdown("#### 🧠 Session memory")
+        st.markdown("#### Session memory")
         if sid:
             st.caption(f"`{sid[:8]}…{sid[-4:]}`")
 
         # ── Quick stats ──────────────────────────
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Turns", sum(1 for m in msgs if m["role"] == "user"))
-        c2.metric("Messages", len(msgs))
-        c3.metric("State", st.session_state.get("conv_state", "idle"))
+        user_turns = sum(1 for m in msgs if m.get("role") == "user")
+        c1, c2 = st.columns(2)
+        c1.metric("Turns", user_turns)
+        c2.metric("State", st.session_state.get("conv_state", "idle"))
 
         st.divider()
 
@@ -74,11 +75,11 @@ def render_memory_popover(memory) -> None:
         st.markdown("**Recent activity**")
         if msgs:
             for m in msgs[-4:]:
-                role_icon = "🧑" if m["role"] == "user" else "🤖"
+                role_icon = "▸" if m["role"] == "user" else "◆"
                 text = " ".join(m["content"].split())[:140]
                 if len(m["content"]) > 140:
                     text += "…"
-                st.markdown(f"{role_icon}  {text}")
+                st.markdown(f"`{role_icon}` {text}")
         else:
             st.caption("_(no turns yet)_")
 

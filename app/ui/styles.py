@@ -33,6 +33,8 @@ _CSS = """
     --radius-md: 12px;
     --radius-lg: 18px;
     --radius-pill: 999px;
+
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ── Global layout ────────────────────────────────────── */
@@ -70,7 +72,7 @@ code {
     font-size: 0.9em;
 }
 
-/* ── Sidebar (unused, but styled for safety) ──────────── */
+/* ── Sidebar (unused) ─────────────────────────────────── */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #0c1c2a 0%, #0a1620 100%);
     border-right: 1px solid var(--border-subtle);
@@ -89,7 +91,9 @@ section[data-testid="stSidebar"] {
     background: linear-gradient(135deg, var(--teal-400), var(--teal-600));
     display: flex; align-items: center; justify-content: center;
     font-size: 20px;
-    box-shadow: 0 6px 18px rgba(45, 212, 191, 0.25);
+    box-shadow:
+        0 6px 20px rgba(45, 212, 191, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 .app-title {
     font-size: 1.2rem;
@@ -102,25 +106,6 @@ section[data-testid="stSidebar"] {
     color: var(--text-muted);
     margin-top: 2px;
 }
-.chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 11px;
-    border-radius: var(--radius-pill);
-    background: rgba(45, 212, 191, 0.08);
-    border: 1px solid var(--border-subtle);
-    color: var(--teal-200);
-    font-size: 0.75rem;
-    font-weight: 500;
-    white-space: nowrap;
-}
-.chip-dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--teal-400);
-    box-shadow: 0 0 8px var(--teal-400);
-}
 .header-rule {
     height: 1px;
     background: linear-gradient(90deg, transparent, var(--border-subtle) 20%, var(--border-subtle) 80%, transparent);
@@ -128,7 +113,12 @@ section[data-testid="stSidebar"] {
 }
 
 /* ── User message bubble (preserves whitespace) ───────── */
-.user-row { display: flex; justify-content: flex-end; margin: 0.6rem 0; }
+.user-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0.6rem 0;
+    animation: fadeUp 0.35s var(--ease);
+}
 .user-bubble {
     max-width: 82%;
     padding: 0.85rem 1.1rem;
@@ -152,6 +142,7 @@ section[data-testid="stSidebar"] {
     background: transparent !important;
     border: none !important;
     padding: 0.4rem 0 !important;
+    animation: fadeUp 0.4s var(--ease);
 }
 [data-testid="stChatMessage"] [data-testid="stChatMessageAvatarUser"] {
     background: linear-gradient(135deg, var(--teal-400), var(--teal-600)) !important;
@@ -162,11 +153,69 @@ section[data-testid="stSidebar"] {
     border: 1px solid var(--border-subtle);
 }
 
+/* ── Thinking indicator ──────────────────────────────── */
+.thinking-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0.6rem 0;
+    color: var(--text-soft);
+    font-size: 0.9rem;
+    animation: fadeUp 0.3s var(--ease);
+}
+.thinking-dots {
+    display: inline-flex;
+    gap: 5px;
+}
+.thinking-dots span {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--teal-400);
+    box-shadow: 0 0 10px var(--glow);
+    animation: dotPulse 1.4s ease-in-out infinite;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+.thinking-label {
+    color: var(--teal-300);
+    font-weight: 500;
+    letter-spacing: -0.005em;
+}
+
+@keyframes dotPulse {
+    0%, 60%, 100% { opacity: 0.35; transform: scale(0.8); }
+    30%           { opacity: 1;    transform: scale(1.05); }
+}
+
+/* ── Streaming cursor ────────────────────────────────── */
+.streaming-cursor {
+    display: inline-block;
+    width: 8px;
+    height: 1.05em;
+    background: var(--teal-400);
+    margin-left: 3px;
+    vertical-align: text-bottom;
+    border-radius: 2px;
+    box-shadow: 0 0 8px var(--glow);
+    animation: cursorBlink 1s steps(2) infinite;
+}
+@keyframes cursorBlink {
+    0%, 50%   { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+/* ── Fade-in used by several elements ────────────────── */
+@keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
 /* ── Code blocks ─────────────────────────────────────── */
 .stCodeBlock, pre {
-    background: #0b1e2d !important;
+    background: #0a1c2a !important;
     border: 1px solid var(--border-subtle) !important;
     border-radius: var(--radius-md) !important;
+    overflow: hidden;
 }
 .stCodeBlock code {
     color: var(--text-primary) !important;
@@ -186,7 +235,7 @@ section[data-testid="stSidebar"] {
     line-height: 1.55 !important;
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif !important;
     resize: vertical !important;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 [data-testid="stTextArea"] textarea:focus {
     border-color: var(--teal-500) !important;
@@ -202,13 +251,15 @@ section[data-testid="stSidebar"] {
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     font-weight: 500;
-    transition: all 0.15s ease;
+    transition: all 0.18s var(--ease);
 }
 .stButton > button:hover {
     background: var(--bg-hover);
     border-color: var(--border-strong);
     color: var(--teal-200);
+    transform: translateY(-1px);
 }
+.stButton > button:active { transform: translateY(0); }
 .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, var(--teal-500), var(--teal-600));
     border: 1px solid var(--teal-500);
@@ -228,18 +279,18 @@ section[data-testid="stSidebar"] {
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
-    color: var(--text-primary);
+    color: var(--text-soft);
     font-weight: 500;
     height: 42px;
     min-width: 42px;
     padding: 0 !important;
-    font-size: 1.05rem;
-    transition: all 0.15s ease;
+    font-size: 1.1rem;
+    transition: all 0.18s var(--ease);
 }
 [data-testid="stPopover"] > button:hover {
     border-color: var(--teal-500);
     background: var(--bg-hover);
-    color: var(--teal-200);
+    color: var(--teal-300);
 }
 [data-testid="stPopoverBody"] {
     background: var(--bg-elevated) !important;
@@ -280,18 +331,6 @@ section[data-testid="stSidebar"] {
     border: 1px solid var(--border-subtle);
     background: var(--bg-surface);
 }
-
-/* ── Memory rows ─────────────────────────────────────── */
-.mem-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 6px 0;
-    font-size: 0.85rem;
-    color: var(--text-soft);
-    border-bottom: 1px dashed var(--border-subtle);
-}
-.mem-row:last-child { border-bottom: none; }
-.mem-row b { color: var(--text-primary); }
 
 /* ── Scrollbar ───────────────────────────────────────── */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

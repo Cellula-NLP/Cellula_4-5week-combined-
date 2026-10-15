@@ -17,6 +17,24 @@ from app.ui.components.memory_view import render_memory_popover
 logger = logging.getLogger(__name__)
 
 
+# ── Thinking indicator + streaming cursor (inline HTML) ─────────
+
+_THINKING_HTML = (
+    '<div class="thinking-box">'
+    '<span class="thinking-dots"><span></span><span></span><span></span></span>'
+    '<span class="thinking-label">{label}…</span>'
+    '</div>'
+)
+
+_CURSOR_HTML = '<span class="streaming-cursor"></span>'
+
+# Friendly labels for internal pipeline stages (from StreamEvent.meta).
+_STAGE_LABELS = {
+    "rewritten_query": "Analyzing request",
+    "relevance": "Checking knowledge base",
+}
+
+
 # ── Runtime wiring ──────────────────────────────────────
 
 def _build_orchestrator(settings):
@@ -45,8 +63,6 @@ def _build_orchestrator(settings):
     embedder = SentenceTransformerEmbedder(settings.embedder_model)
     vdb = ChromaVectorStore(settings.chroma_path, settings.chroma_collection)
 
-    # Wrap the raw sandbox in the CodeExecutor service — the UI calls
-    # `.execute()`, which lives on the service, not on the port itself.
     sandbox = SubprocessSandbox(settings.exec_timeout_s, settings.exec_mem_mb)
     executor = CodeExecutor(sandbox)
 
@@ -80,7 +96,6 @@ def _build_orchestrator(settings):
         ingestion=ingestion,
         state_store=state_store,
     )
-    # Return the CodeExecutor (has .execute) — NOT the raw sandbox.
     return orchestrator, executor, memory, vdb
 
 
@@ -93,9 +108,12 @@ def get_runtime():
 # ── Header ──────────────────────────────────────────────
 
 def _render_header(vdb, memory) -> None:
-    left, right_chip, right_mem = st.columns(
-        [7, 2, 1], gap="small", vertical_alignment="center",
-    )
+    """Header: logo + title on the left, memory popover on the right.
+
+    The chunk count is intentionally NOT shown — it's internal state
+    that a user doesn't need to see in a production app.
+    """
+    left, right = st.columns([10, 1], gap="small", vertical_alignment="center")
     with left:
         st.markdown(
             """
@@ -109,19 +127,7 @@ def _render_header(vdb, memory) -> None:
             """,
             unsafe_allow_html=True,
         )
-    with right_chip:
-        st.markdown(
-            f"""
-            <div style="display:flex; justify-content:flex-end; padding-top:6px;">
-                <div class="chip">
-                    <span class="chip-dot"></span>
-                    {vdb.count()} chunks
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with right_mem:
+    with right:
         render_memory_popover(memory)
     st.markdown("<div class='header-rule'></div>", unsafe_allow_html=True)
 
@@ -167,27 +173,49 @@ def _render_pending_turn(
     executor,
     turn_id: str,
 ) -> None:
-    """Stream the assistant's reply for the current turn.
+    """Stream the assistant's reply with a live thinking indicator + cursor.
 
-    ``turn_id`` is a stable identifier for this turn, used to build
-    deterministic Run button keys.
+    States:
+      1. Thinking — animated dots with a friendly stage label.
+      2. Streaming — tokens appear with a blinking cursor at the end.
+      3. Done — cursor removed, full Markdown rendered cleanly.
     """
     render_user_bubble(display_text)
 
     with st.chat_message("assistant", avatar="🤖"):
         placeholder = st.empty()
+
+        # State 1 — Thinking
+        placeholder.markdown(
+            _THINKING_HTML.format(label="Thinking"),
+            unsafe_allow_html=True,
+        )
+
         buffer: list[str] = []
         final_meta: dict = {}
+        streaming_started = False
 
         orchestrator, executor, _, _ = get_runtime()
         try:
             agen = orchestrator.handle(st.session_state.session_id, composed_text)
             for event in iter_async(agen):
                 if event.kind in ("token", "message"):
+                    streaming_started = True
                     buffer.append(event.payload)
-                    placeholder.markdown("".join(buffer))
+                    # State 2 — Streaming with cursor
+                    placeholder.markdown(
+                        "".join(buffer) + _CURSOR_HTML,
+                        unsafe_allow_html=True,
+                    )
                 elif event.kind == "meta":
                     final_meta.update(event.payload)
+                    stage = event.payload.get("stage")
+                    # Only update the thinking label if streaming hasn't started
+                    if not streaming_started and stage in _STAGE_LABELS:
+                        placeholder.markdown(
+                            _THINKING_HTML.format(label=_STAGE_LABELS[stage]),
+                            unsafe_allow_html=True,
+                        )
                 elif event.kind == "state_change":
                     st.session_state.conv_state = event.payload
                 elif event.kind == "error":
@@ -200,7 +228,9 @@ def _render_pending_turn(
             buffer.append(f"\n\n> ❌ Unexpected error: {exc}")
             placeholder.markdown("".join(buffer))
 
-    full_reply = "".join(buffer)
+        # State 3 — Done (no cursor)
+        full_reply = "".join(buffer)
+        placeholder.markdown(full_reply)
 
     # Render Run buttons for THIS turn using the deterministic turn_id.
     render_reply_controls(full_reply, executor, message_id=turn_id)
@@ -224,7 +254,7 @@ def main() -> None:
 
     _render_header(vdb, memory)
 
-    # History — pass executor so Run buttons reappear with stable keys.
+    # History — pass executor so past Run buttons reappear with stable keys.
     render_history(executor)
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
