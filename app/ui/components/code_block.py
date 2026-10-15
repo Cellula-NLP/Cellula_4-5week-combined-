@@ -1,15 +1,20 @@
 """Run button + reply-code-parsing utilities with persistent results.
 
-Key design:
+Run buttons appear ONLY for responses that contain *generated* code
+(the Generate route). Explanation responses contain illustrative
+snippets that are meant to be read, not executed — showing Run
+buttons under them is misleading (many are fragments that produce
+no output or reference undefined names).
+
+Key implementation details:
   • Button keys are deterministic (based on snippet_id), so Streamlit
     recognizes clicks across reruns.
-  • Execution results are stored in st.session_state keyed by snippet_id
-    and re-rendered on every cycle, so they survive reruns.
+  • Execution results are stored in st.session_state keyed by
+    snippet_id, so they survive reruns.
 """
 from __future__ import annotations
 
 import re
-from typing import Any
 
 import streamlit as st
 
@@ -26,13 +31,15 @@ def render_reply_controls(
     executor,
     *,
     message_id: str,
+    show_run: bool = False,
 ) -> None:
     """Parse fenced code blocks in an assistant reply and add Run buttons.
 
-    ``message_id`` must be unique per assistant message so that button
-    keys stay stable across reruns.
+    ``message_id``   — unique per assistant message (stable button keys).
+    ``show_run``     — if False, no Run buttons are rendered at all.
+                       Set to True only for generated code responses.
     """
-    if not markdown_text or executor is None:
+    if not show_run or not markdown_text or executor is None:
         return
 
     matches = list(_CODE_FENCE.finditer(markdown_text))
@@ -64,7 +71,7 @@ def render_run_controls(
     label: str | None = None,
     snippet_id: str,
 ) -> None:
-    """Render a Run button + stdin field with a STABLE key."""
+    """Render a Run button with a STABLE key. Executes the code as-is."""
     if not runnable:
         return
 
@@ -72,35 +79,27 @@ def render_run_controls(
         st.caption(label)
 
     key = f"run_{snippet_id}"
-    stdin_key = f"stdin_{snippet_id}"
     result_key = f"result_{snippet_id}"
 
-    col_run, col_stdin = st.columns([1, 4], gap="small")
+    col_run, col_info = st.columns([1, 4], gap="small")
     with col_run:
         run_clicked = st.button(
             "▶ Run", key=key, use_container_width=True,
         )
-    with col_stdin:
-        stdin = st.text_input(
-            "stdin",
-            key=stdin_key,
-            label_visibility="collapsed",
-            placeholder="Optional stdin passed to the program…",
-        )
+    with col_info:
+        st.caption("Executes the code exactly as shown above.")
 
-    # Persist the last execution result for this snippet.
     stored: ExecutionResult | None = st.session_state.get(result_key)
 
     if run_clicked:
         with st.spinner("Executing in sandbox…"):
             try:
-                stored = executor.execute(code, language, stdin=stdin or "")
+                stored = executor.execute(code, language)
             except Exception as exc:
                 st.error(f"Execution error: {exc}")
                 stored = None
             if stored is not None:
                 st.session_state[result_key] = stored
-                # Also keep a compact summary for the memory popover.
                 st.session_state.last_execution = {
                     "ok": stored.ok,
                     "exit_code": stored.exit_code,

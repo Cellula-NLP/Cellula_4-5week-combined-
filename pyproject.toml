@@ -21,8 +21,9 @@ dependencies = [
     "datasets>=2.20",
     "tiktoken>=0.7",
     "pypdf>=4.3",
+    "einops>=0.7",
 
-
+    # ── Pinned for Intel Mac (PyTorch 2.2.2 max) ──
     "numpy<2",
     "transformers==4.51.1",
     "sentence-transformers==2.7.0",

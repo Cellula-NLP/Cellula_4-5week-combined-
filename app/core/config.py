@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # ── LLM ──────────────────────────────────────
     llm_provider: str = "groq"
-    llm_model: str = "openai/gpt-oss-120b"
+    llm_model: str = "qwen/qwen3.8-27b"
     llm_fallback_model: str = "openai/gpt-oss-20b"
     llm_api_key: str = ""
     llm_base_url: str = "https://api.groq.com/openai/v1"
@@ -28,15 +28,26 @@ class Settings(BaseSettings):
     llm_max_retries: int = 3
     llm_temperature: float = 0.2
 
-    # ── Embeddings ───────────────────────────────
-    embedder_model: str = "BAAI/bge-small-en-v1.5"
-    embedder_dim: int = 384
+    # ── Embeddings (code-specialized) ────────────
+    embedder_model: str = "jinaai/jina-embeddings-v2-base-code"
+    embedder_fallback_model: str = "BAAI/bge-small-en-v1.5"
+    embedder_dim: int = 768
+    embedder_query_prefix: str = ""  # Jina doesn't use a query prefix
+
+    # ── Reranker ─────────────────────────────────
+    reranker_enabled: bool = True
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    rerank_candidates: int = 20
 
     # ── Chroma ───────────────────────────────────
     chroma_path: str = "./data/chroma"
     chroma_collection: str = "coding_knowledge"
     retrieval_top_k: int = 4
-    relevance_threshold: float = 0.5
+    retrieval_min_score: float = 0.25
+    mmr_lambda: float = 0.7  # 1.0 = pure relevance, 0.0 = pure diversity
+
+    # ── Relevance ────────────────────────────────
+    relevance_threshold: float = 0.35
 
     # ── Memory ───────────────────────────────────
     memory_window: int = 12
@@ -54,14 +65,12 @@ class Settings(BaseSettings):
     @field_validator("llm_api_key")
     @classmethod
     def _warn_if_empty(cls, v: str) -> str:
-        """Warn loudly if the API key looks empty or placeholder-like."""
         if not v or _looks_like_placeholder(v):
             import warnings
             warnings.warn(
                 "LLM_API_KEY is empty or placeholder. "
                 "Set a real key in .env — e.g. a free Groq key from "
-                "https://console.groq.com/keys or an OpenRouter key from "
-                "https://openrouter.ai/settings/keys.",
+                "https://console.groq.com/keys.",
                 stacklevel=2,
             )
         return v
@@ -73,14 +82,12 @@ class Settings(BaseSettings):
 
 
 def _looks_like_placeholder(value: str) -> bool:
-    """True if the value looks like an obvious placeholder."""
     upper = value.strip().upper()
     return any(marker in upper for marker in ("YOUR", "PLACEHOLDER", "XXX", "CHANGEME"))
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Singleton settings accessor."""
     s = Settings()
     s.ensure_dirs()
     return s

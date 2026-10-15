@@ -29,6 +29,7 @@ _THINKING_HTML = (
 _CURSOR_HTML = '<span class="streaming-cursor"></span>'
 
 # Friendly labels for internal pipeline stages (from StreamEvent.meta).
+# Only stages that pipelines actually emit are listed here.
 _STAGE_LABELS = {
     "rewritten_query": "Analyzing request",
     "relevance": "Checking knowledge base",
@@ -42,6 +43,7 @@ def _build_orchestrator(settings):
     from app.infrastructure.embeddings.sentence_transformer import SentenceTransformerEmbedder
     from app.infrastructure.vectorstore.chroma_store import ChromaVectorStore
     from app.infrastructure.tools.code_runner import SubprocessSandbox
+    from app.infrastructure.tools.reranker import CrossEncoderReranker
     from app.infrastructure.memory.session_memory import SQLiteMemoryStore
     from app.infrastructure.loaders.chunker import CodeAwareChunker
     from app.services.intent_classifier import IntentClassifier
@@ -60,8 +62,17 @@ def _build_orchestrator(settings):
     from app.domain.enums import Intent
 
     llm = OpenRouterClient(settings)
-    embedder = SentenceTransformerEmbedder(settings.embedder_model)
-    vdb = ChromaVectorStore(settings.chroma_path, settings.chroma_collection)
+
+    # Code-specialized embedder with automatic fallback.
+    embedder = SentenceTransformerEmbedder(
+        model_name=settings.embedder_model,
+        fallback_model=settings.embedder_fallback_model,
+        query_prefix=settings.embedder_query_prefix,
+    )
+
+    vdb = ChromaVectorStore(
+        settings.chroma_path, settings.chroma_collection,
+    )
 
     sandbox = SubprocessSandbox(settings.exec_timeout_s, settings.exec_mem_mb)
     executor = CodeExecutor(sandbox)
@@ -69,9 +80,22 @@ def _build_orchestrator(settings):
     memory_store = SQLiteMemoryStore(settings.sessions_db)
     chunker = CodeAwareChunker()
 
+    # Two-stage retrieval: bi-encoder → threshold/MMR → cross-encoder rerank.
+    reranker = CrossEncoderReranker(
+        model_name=settings.reranker_model,
+        enabled=settings.reranker_enabled,
+    ) if settings.reranker_enabled else None
+
     memory = MemoryManager(memory_store, window=settings.memory_window)
     classifier = IntentClassifier(llm, settings.classifier_min_confidence)
-    retriever = Retriever(embedder, vdb, top_k=settings.retrieval_top_k)
+    retriever = Retriever(
+        embedder, vdb,
+        top_k=settings.retrieval_top_k,
+        min_score=settings.retrieval_min_score,
+        mmr_lambda=settings.mmr_lambda,
+        reranker=reranker,
+        rerank_candidates=settings.rerank_candidates,
+    )
     evaluator = RelevanceEvaluator(llm, settings.relevance_threshold)
     generator = CodeGenerator(llm, memory_store)
     explainer = CodeExplainer(llm, memory_store)
@@ -108,11 +132,6 @@ def get_runtime():
 # ── Header ──────────────────────────────────────────────
 
 def _render_header(vdb, memory) -> None:
-    """Header: logo + title on the left, memory popover on the right.
-
-    The chunk count is intentionally NOT shown — it's internal state
-    that a user doesn't need to see in a production app.
-    """
     left, right = st.columns([10, 1], gap="small", vertical_alignment="center")
     with left:
         st.markdown(
@@ -173,19 +192,10 @@ def _render_pending_turn(
     executor,
     turn_id: str,
 ) -> None:
-    """Stream the assistant's reply with a live thinking indicator + cursor.
-
-    States:
-      1. Thinking — animated dots with a friendly stage label.
-      2. Streaming — tokens appear with a blinking cursor at the end.
-      3. Done — cursor removed, full Markdown rendered cleanly.
-    """
     render_user_bubble(display_text)
 
     with st.chat_message("assistant", avatar="🤖"):
         placeholder = st.empty()
-
-        # State 1 — Thinking
         placeholder.markdown(
             _THINKING_HTML.format(label="Thinking"),
             unsafe_allow_html=True,
@@ -202,7 +212,6 @@ def _render_pending_turn(
                 if event.kind in ("token", "message"):
                     streaming_started = True
                     buffer.append(event.payload)
-                    # State 2 — Streaming with cursor
                     placeholder.markdown(
                         "".join(buffer) + _CURSOR_HTML,
                         unsafe_allow_html=True,
@@ -210,7 +219,6 @@ def _render_pending_turn(
                 elif event.kind == "meta":
                     final_meta.update(event.payload)
                     stage = event.payload.get("stage")
-                    # Only update the thinking label if streaming hasn't started
                     if not streaming_started and stage in _STAGE_LABELS:
                         placeholder.markdown(
                             _THINKING_HTML.format(label=_STAGE_LABELS[stage]),
@@ -228,13 +236,15 @@ def _render_pending_turn(
             buffer.append(f"\n\n> ❌ Unexpected error: {exc}")
             placeholder.markdown("".join(buffer))
 
-        # State 3 — Done (no cursor)
         full_reply = "".join(buffer)
         placeholder.markdown(full_reply)
 
-    # Render Run buttons for THIS turn using the deterministic turn_id.
-    render_reply_controls(full_reply, executor, message_id=turn_id)
-
+    intent = final_meta.get("intent")
+    render_reply_controls(
+        full_reply, executor,
+        message_id=turn_id,
+        show_run=(intent == "generate_code"),
+    )
     append_message("assistant", full_reply, meta=final_meta)
 
 
@@ -253,8 +263,6 @@ def main() -> None:
     orchestrator, executor, memory, vdb = get_runtime()
 
     _render_header(vdb, memory)
-
-    # History — pass executor so past Run buttons reappear with stable keys.
     render_history(executor)
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
@@ -278,7 +286,6 @@ def main() -> None:
         append_message("user", display_text, meta={"composed": composed})
         st.session_state.input_counter += 1
 
-        # The turn_id must match what render_history uses on the next rerun.
         next_assistant_index = len(st.session_state.messages)
         turn_id = f"msg{next_assistant_index}"
 

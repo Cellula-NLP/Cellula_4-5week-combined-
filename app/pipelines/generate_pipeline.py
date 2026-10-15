@@ -6,6 +6,11 @@ Task-compliant flow (PDF pages 7, 9, 10):
     └─ NOT_RELEVANT → do NOT hallucinate; ask the user for the correct
                       solution so it can be ingested for future use.
 
+The "not relevant" branch follows PDF page 10 literally: the assistant
+does not generate anything from general training when the retrieved
+context is insufficient. It asks the user to provide a solution, which
+the ingestion service will then embed and store in Chroma.
+
 Follow-up handling:
   Short follow-ups like "now add error handling" are rewritten with
   context from memory before retrieval, so the vector search works.
@@ -90,6 +95,7 @@ class GeneratePipeline(Pipeline):
             ):
                 yield event
         else:
+            # PDF page 10: do not hallucinate. Ask the user for a solution.
             logger.info(
                 "NOT_RELEVANT (score=%.2f) → asking user for solution",
                 verdict.score,

@@ -11,8 +11,9 @@ from app.ui.components.code_block import render_reply_controls
 def render_history(executor=None) -> None:
     """Render all prior messages from session state.
 
-    Each assistant message gets a deterministic ``message_id`` (its
-    index in the list) so Run buttons keep stable keys across reruns.
+    Run buttons are only rendered for assistant messages whose meta
+    says the intent was ``generate_code`` — matching the task
+    requirement ("Button to execute *generated* code").
     """
     for idx, msg in enumerate(st.session_state.get("messages", [])):
         if msg["role"] == "user":
@@ -21,9 +22,11 @@ def render_history(executor=None) -> None:
             with st.chat_message("assistant", avatar="🤖"):
                 st.markdown(msg["content"])
                 if executor is not None:
+                    intent = (msg.get("meta") or {}).get("intent")
                     render_reply_controls(
                         msg["content"], executor,
                         message_id=f"msg{idx}",
+                        show_run=(intent == "generate_code"),
                     )
 
 
