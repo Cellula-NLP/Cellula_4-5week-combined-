@@ -1,7 +1,7 @@
 """Prompt for code explanation (NO RAG)."""
 from __future__ import annotations
-from app.domain.enums import MessageRole
 
+from app.domain.enums import MessageRole
 from app.domain.models import Message
 
 _SYSTEM = """You are a senior software engineer who explains code clearly.
@@ -22,9 +22,10 @@ def build_explainer_prompt(
     history: list[Message],
     language: str | None = None,
 ) -> list[Message]:
-    messages: list[Message] = [Message(role="system", content=_SYSTEM)]
+    """Build the explainer prompt. No retrieval — direct LLM analysis."""
+    messages: list[Message] = [Message(role=MessageRole.SYSTEM, content=_SYSTEM)]
 
-    # Prepend a short history window (last few turns) for context.
+    # Short conversation memory — only real user/assistant turns.
     for m in history[-6:]:
         if m.role in (MessageRole.USER, MessageRole.ASSISTANT):
             messages.append(m)
@@ -33,5 +34,5 @@ def build_explainer_prompt(
     body = f"{query}{lang_hint}"
     if code:
         body += f"\n\nCode to explain:\n```\n{code}\n```"
-    messages.append(Message(role="user", content=body))
+    messages.append(Message(role=MessageRole.USER, content=body))
     return messages

@@ -6,9 +6,10 @@ import re
 from typing import AsyncIterator
 
 from app.core.config import Settings
-from app.domain.enums import ConvState, Intent
+from app.domain.enums import ConvState, Intent, MessageRole
 from app.domain.models import Classification, StreamEvent
 from app.pipelines.base import PipelineContext
+from app.services.framework_detector import detect_frameworks
 from app.services.intent_classifier import IntentClassifier
 from app.services.memory_manager import MemoryManager
 from app.services.router import Router
@@ -18,13 +19,9 @@ logger = logging.getLogger(__name__)
 
 # ── Code extraction (module-level helpers) ────────────────────────
 
-# Matches ```lang\n...\n``` and ```\n...\n``` (lang optional).
 _CODE_FENCE = re.compile(r"```[a-zA-Z0-9_+\-]*\n(.*?)```", re.DOTALL)
-
-# Matches `inline` code spans.
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 
-# Prefixes that strongly suggest a line is code.
 _CODE_LINE_PREFIXES: tuple[str, ...] = (
     "def ", "class ", "async def ", "import ", "from ",
     "return ", "if ", "elif ", "else:", "for ", "while ",
@@ -32,14 +29,12 @@ _CODE_LINE_PREFIXES: tuple[str, ...] = (
     "print(", "self.", "@", "yield ", "await ",
 )
 
-# Substrings that also suggest code (assignments, comparisons, calls).
 _CODE_LINE_SUBSTRINGS: tuple[str, ...] = (
     " = ", ":=", "==", "!=", ">=", "<=", "->", "()", "):",
 )
 
 
 def _looks_like_code_line(line: str) -> bool:
-    """True if the line looks like a code snippet rather than prose."""
     s = line.strip()
     if not s:
         return False
@@ -49,7 +44,6 @@ def _looks_like_code_line(line: str) -> bool:
 
 
 def _looks_like_snippet(text: str) -> bool:
-    """True if the whole text is short and contains at least one code line."""
     if len(text) > 800:
         return False
     lines = [line for line in text.split("\n") if line.strip()]
@@ -57,23 +51,14 @@ def _looks_like_snippet(text: str) -> bool:
 
 
 def _extract_code(text: str) -> str | None:
-    """Extract code from a user message.
-
-    Order of preference:
-      1. ```fenced``` blocks
-      2. Text after the last ':' on a line if the tail looks like code
-      3. Whole message if it looks like a snippet
-      4. First `inline` code span
-    """
+    """Extract code from a user message."""
     if not text or not text.strip():
         return None
 
-    # 1) Fenced code block.
     match = _CODE_FENCE.search(text)
     if match:
         return match.group(1).strip()
 
-    # 2) Everything after ':' if the tail looks like code.
     for line in text.split("\n"):
         if ":" in line:
             _, _, after = line.partition(":")
@@ -82,11 +67,9 @@ def _extract_code(text: str) -> str | None:
                 idx = text.index(line)
                 return text[idx:].split(":", 1)[1].strip()
 
-    # 3) Whole-message snippet.
     if _looks_like_snippet(text):
         return text.strip()
 
-    # 4) Inline code span.
     inline = _INLINE_CODE.search(text)
     if inline:
         return inline.group(1).strip()
@@ -94,8 +77,37 @@ def _extract_code(text: str) -> str | None:
     return None
 
 
+def _extract_code_for_ingestion(text: str) -> str:
+    """Pull code out of a user-provided solution.
+
+    Prefers a fenced block, then any line that looks like code (with all
+    following lines). If nothing looks like code, returns the text as-is
+    so short natural-language solutions still get stored.
+    """
+    text = (text or "").strip()
+    if not text:
+        return text
+
+    # Prefer fenced blocks — they're unambiguous.
+    match = _CODE_FENCE.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # Otherwise, cut from the first code-looking line to the end.
+    lines = text.split("\n")
+    for idx, line in enumerate(lines):
+        if _looks_like_code_line(line):
+            return "\n".join(lines[idx:]).strip()
+
+    # Last resort: return the raw text so we don't lose short answers.
+    return text
+
+
+def _strip_fences(text: str) -> str:
+    return _CODE_FENCE.sub("", text).strip()
+
+
 def _looks_like_solution(text: str) -> bool:
-    """Detect whether a user message is a solution rather than a new question."""
     tl = text.lower()
     if "```" in text and len(text) > 60:
         return True
@@ -103,6 +115,7 @@ def _looks_like_solution(text: str) -> bool:
         "here is the", "correct solution", "use this", "the answer is",
         "try this", "the implementation is", "here's the solution",
         "this should work", "you can use this",
+        "correct implementation", "reference implementation",
     )
     return any(m in tl for m in markers)
 
@@ -110,7 +123,6 @@ def _looks_like_solution(text: str) -> bool:
 class ConversationOrchestrator:
     """Stateless coordinator. Per-session state lives in MemoryStore."""
 
-    # Recognized answers to "Explain or Generate?".
     _EXPLAIN_CHOICES: frozenset[str] = frozenset({
         "explain", "explain the code", "explain code", "explain it",
         "the first one", "1", "a",
@@ -119,6 +131,8 @@ class ConversationOrchestrator:
         "generate", "generate code", "generate new code", "generate it",
         "the second one", "2", "b",
     })
+
+    _CLASSIFIER_HISTORY_LIMIT = 8
 
     def __init__(
         self,
@@ -134,16 +148,14 @@ class ConversationOrchestrator:
         self._router = router
         self._memory = memory
         self._ingestion = ingestion
-        self._state_store = state_store  # in-memory FSM per session
-
-    # ── Public entrypoint ─────────────────────────
+        self._state_store = state_store
 
     async def handle(
         self,
         session_id: str,
         user_input: str,
     ) -> AsyncIterator[StreamEvent]:
-        # ── Guard: input validation ──────────────
+        # ── Input guard ──────────────────────────
         if not user_input or not user_input.strip():
             yield StreamEvent.error("Your message is empty. Please type something.")
             yield StreamEvent.done()
@@ -153,7 +165,7 @@ class ConversationOrchestrator:
             user_input = user_input[: self._settings.max_input_chars]
             logger.warning("Input truncated to %d chars.", self._settings.max_input_chars)
 
-        # ── Recover from a pending clarification ─
+        # ── Clarification recovery ───────────────
         resolved = self._try_resolve_clarification(session_id, user_input)
         if resolved is not None:
             classification, recovered_code, recovered_query = resolved
@@ -172,13 +184,17 @@ class ConversationOrchestrator:
                 yield event
             return
 
-        # ── State guard: awaiting solution from prior Not-Relevant ──
+        # ── AWAITING_SOLUTION guard ──────────────
         if self._state_store.get(session_id) == ConvState.AWAITING_SOLUTION:
             if _looks_like_solution(user_input):
+                # Extract ONLY the code from the user's message — don't
+                # poison the knowledge base with "here is the solution…" prose.
+                code_to_ingest = _extract_code_for_ingestion(user_input)
                 pending_query = self._memory.profile(session_id).get("pending_query", "")
+
                 result = self._ingestion.ingest_solution(
                     session_id=session_id,
-                    solution_text=user_input,
+                    solution_text=code_to_ingest,
                     original_query=pending_query,
                 )
                 self._state_store[session_id] = ConvState.IDLE
@@ -186,7 +202,6 @@ class ConversationOrchestrator:
                 yield StreamEvent.message(result.message)
                 yield StreamEvent.done()
                 return
-            # User asked something new → drop the AWAITING_SOLUTION state.
             self._state_store[session_id] = ConvState.IDLE
 
         # ── Persist user turn ────────────────────
@@ -194,8 +209,18 @@ class ConversationOrchestrator:
 
         # ── Extract code + classify ──────────────
         code = _extract_code(user_input)
+        clean_query = _strip_fences(user_input) or user_input
+
+        history = self._memory.full_history(
+            session_id, limit=self._CLASSIFIER_HISTORY_LIMIT,
+        )
+        if history and history[-1].role == MessageRole.USER:
+            history = history[:-1]
+
         try:
-            classification = await self._classifier.classify(user_input, code)
+            classification = await self._classifier.classify(
+                clean_query, code, history=history,
+            )
         except Exception as exc:
             logger.exception("Classification failed")
             yield StreamEvent.error(f"Could not classify your request: {exc}")
@@ -207,10 +232,15 @@ class ConversationOrchestrator:
             classification.intent, classification.confidence,
         )
 
-        # ── Handle CLARIFY ───────────────────────
+        # ── Persist preferences ──────────────────
+        if classification.language:
+            self._memory.set_language(session_id, classification.language)
+        for fw in detect_frameworks(user_input):
+            self._memory.add_framework(session_id, fw)
+
+        # ── CLARIFY ──────────────────────────────
         if classification.intent == Intent.CLARIFY:
             self._state_store[session_id] = ConvState.AWAITING_CLARIFICATION
-            # Remember the pending code/query for the next turn.
             self._memory.update_preferences(
                 session_id,
                 pending_code=code or "",
@@ -226,7 +256,7 @@ class ConversationOrchestrator:
             yield StreamEvent.done()
             return
 
-        # ── Handle OUT_OF_SCOPE ──────────────────
+        # ── OUT_OF_SCOPE ─────────────────────────
         if classification.intent == Intent.OUT_OF_SCOPE:
             msg = (
                 "I'm specialized in programming tasks — code generation and "
@@ -237,7 +267,7 @@ class ConversationOrchestrator:
             yield StreamEvent.done()
             return
 
-        # ── Dispatch to the matching pipeline ────
+        # ── Dispatch ─────────────────────────────
         async for event in self._dispatch(
             session_id=session_id,
             query=user_input,
@@ -245,8 +275,6 @@ class ConversationOrchestrator:
             code=code,
         ):
             yield event
-
-    # ── Dispatch ──────────────────────────────────
 
     async def _dispatch(
         self,
@@ -256,7 +284,6 @@ class ConversationOrchestrator:
         classification: Classification,
         code: str | None,
     ) -> AsyncIterator[StreamEvent]:
-        """Route the classified request to the appropriate pipeline."""
         try:
             pipeline = self._router.route(classification.intent)
         except ValueError as exc:
@@ -276,7 +303,6 @@ class ConversationOrchestrator:
             async for event in pipeline.run(
                 session_id=session_id, query=query, context=context,
             ):
-                # Keep the FSM in sync with pipeline-driven state changes.
                 if event.kind == "state_change":
                     try:
                         self._state_store[session_id] = ConvState(event.payload)
@@ -290,19 +316,11 @@ class ConversationOrchestrator:
             yield StreamEvent.error(f"Something went wrong: {exc}")
             yield StreamEvent.done()
 
-    # ── Clarification recovery ────────────────────
-
     def _try_resolve_clarification(
         self,
         session_id: str,
         user_input: str,
     ) -> tuple[Classification, str | None, str] | None:
-        """If awaiting a clarify reply, interpret the user's answer.
-
-        Returns ``(classification, recovered_code, recovered_query)`` on
-        success, or ``None`` if we are not in clarification state or the
-        answer isn't a recognized choice.
-        """
         if self._state_store.get(session_id) != ConvState.AWAITING_CLARIFICATION:
             return None
 
@@ -311,9 +329,7 @@ class ConversationOrchestrator:
         pending_code = (profile.get("pending_code") or "").strip() or None
         pending_query = (profile.get("pending_query") or "").strip()
 
-        # The clarification turn is over either way — reset the FSM.
         self._state_store[session_id] = ConvState.IDLE
-        # Clear pending fields so they don't leak into later turns.
         self._memory.update_preferences(
             session_id, pending_code=None, pending_query=None,
         )
@@ -342,7 +358,6 @@ class ConversationOrchestrator:
                 pending_query or user_input,
             )
 
-        # Not a valid choice → fall through to normal classification.
         logger.info(
             "Clarification answer %r not recognized; re-classifying.", ans,
         )

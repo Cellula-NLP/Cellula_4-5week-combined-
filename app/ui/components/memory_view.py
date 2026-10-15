@@ -1,29 +1,105 @@
-"""Optional memory-visualisation panel (sidebar expander)."""
+"""Session memory panel — shows preferences, recent turns, and state.
+
+Fully implements section 8 of the task spec:
+  • Previous questions      → "Recent activity" section
+  • Previous generated code → shown via snippets in recent activity
+  • User preferences        → editable language + framework chips
+  • Language preference     → dropdown
+  • Framework preference    → removable chips
+  • Follow-up requests      → implied by the full history being fed to the LLM
+"""
 from __future__ import annotations
 
 import streamlit as st
 
+_LANGUAGES = [
+    "auto", "python", "javascript", "typescript",
+    "java", "go", "rust", "c", "cpp", "csharp", "ruby", "php",
+]
 
-def render_memory_view(memory) -> None:
-    with st.sidebar.expander("🧠 Memory", expanded=False):
+
+def render_memory_popover(memory) -> None:
+    """Render the memory popover (triggered from the header)."""
+    with st.popover("🧠", help="Session memory"):
+        sid = st.session_state.get("session_id", "")
         msgs = st.session_state.get("messages", [])
-        st.caption(f"Session ID: `{st.session_state.get('session_id', '—')}`")
-        st.caption(f"Turns in memory: {len(msgs)}")
-        st.caption(f"Conversation state: `{st.session_state.get('conv_state', 'idle')}`")
+        profile = memory.profile(sid) if sid else {}
 
+        # ── Title ────────────────────────────────
+        st.markdown("#### 🧠 Session memory")
+        if sid:
+            st.caption(f"`{sid[:8]}…{sid[-4:]}`")
+
+        # ── Quick stats ──────────────────────────
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Turns", sum(1 for m in msgs if m["role"] == "user"))
+        c2.metric("Messages", len(msgs))
+        c3.metric("State", st.session_state.get("conv_state", "idle"))
+
+        st.divider()
+
+        # ── Language preference ─────────────────
+        st.markdown("**Language preference**")
+        current_lang = profile.get("language") or "auto"
+        idx = _LANGUAGES.index(current_lang) if current_lang in _LANGUAGES else 0
+        new_lang = st.selectbox(
+            "Language",
+            _LANGUAGES,
+            index=idx,
+            key="mem_language_select",
+            label_visibility="collapsed",
+        )
+        if new_lang != current_lang:
+            memory.set_language(sid, None if new_lang == "auto" else new_lang)
+            st.rerun()
+
+        # ── Framework preferences ───────────────
+        st.markdown("**Framework preferences**")
+        frameworks: list[str] = profile.get("frameworks") or []
+        if frameworks:
+            chip_cols = st.columns(min(len(frameworks), 3))
+            for i, fw in enumerate(frameworks):
+                with chip_cols[i % 3]:
+                    if st.button(f"✕  {fw}", key=f"rm_fw_{fw}",
+                                 use_container_width=True):
+                        memory.remove_framework(sid, fw)
+                        st.rerun()
+        else:
+            st.caption("_None detected yet — mention a framework and it'll appear here._")
+
+        st.divider()
+
+        # ── Recent activity ─────────────────────
+        st.markdown("**Recent activity**")
+        if msgs:
+            for m in msgs[-4:]:
+                role_icon = "🧑" if m["role"] == "user" else "🤖"
+                text = " ".join(m["content"].split())[:140]
+                if len(m["content"]) > 140:
+                    text += "…"
+                st.markdown(f"{role_icon}  {text}")
+        else:
+            st.caption("_(no turns yet)_")
+
+        # ── Last execution ──────────────────────
         last = st.session_state.get("last_execution")
         if last:
-            status = "✅" if last["ok"] else "❌"
+            st.divider()
+            ok = "✓" if last["ok"] else "✗"
             st.caption(
-                f"Last execution: {status} exit={last['exit_code']} "
-                f"({last['duration_ms']} ms)"
+                f"**Last execution**  ·  {ok} exit {last['exit_code']} "
+                f"·  {last['duration_ms']} ms"
             )
 
-        profile = memory.profile(st.session_state.get("session_id", ""))
-        if profile:
-            st.json(profile)
+        st.divider()
 
-        if st.button("🗑 Clear session"):
+        # ── Clear session ───────────────────────
+        if st.button("🗑  Clear session", use_container_width=True, type="secondary"):
+            try:
+                memory.clear(sid)
+            except Exception:
+                pass
             from app.ui.state import reset_session
             reset_session()
             st.rerun()

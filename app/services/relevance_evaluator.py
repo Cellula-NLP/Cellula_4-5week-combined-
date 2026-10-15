@@ -1,7 +1,11 @@
 """LLM-based relevance evaluator.
 
-Answers: 'Is the retrieved context sufficiently relevant to answer the request?'
-Default on any failure: NOT_RELEVANT (never hallucinate).
+Task requirement (PDF page 9): ask an LLM whether the retrieved
+context is sufficiently relevant. If not, the pipeline must not
+hallucinate — it should ask the user for the correct solution.
+
+Default on any evaluator failure: NOT_RELEVANT (fail-safe, prevents
+hallucination per the task).
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ class RelevanceEvaluator:
         self._threshold = threshold
 
     async def evaluate(self, query: str, docs: list[RetrievedDoc]) -> Verdict:
-        # Empty retrieval → immediately NOT_RELEVANT.
+        # Empty retrieval → NOT_RELEVANT immediately (no LLM call needed).
         if not docs:
             return Verdict(Relevance.NOT_RELEVANT, 0.0, "no documents retrieved")
 
@@ -37,20 +41,28 @@ class RelevanceEvaluator:
                 messages, json_mode=True, temperature=0.0, max_tokens=200,
             )
             data = self._parse_json(raw)
-            score = float(data.get("score", 0.0))
-            verdict_str = str(data.get("verdict", "not_relevant")).lower()
-            reason = data.get("reason", "")
 
+            score = float(data.get("score", 0.0))
+            verdict_str = str(data.get("verdict", "not_relevant")).lower().strip()
+            reason = str(data.get("reason", "")).strip()
+
+            # Trust the verdict, but require a minimum score too.
             if verdict_str == "relevant" and score >= self._threshold:
                 return Verdict(Relevance.RELEVANT, score, reason)
+
             return Verdict(Relevance.NOT_RELEVANT, score, reason)
 
         except Exception as exc:
-            logger.warning("Relevance evaluator failed: %s. Defaulting NOT_RELEVANT.", exc)
-            return Verdict(Relevance.NOT_RELEVANT, 0.0, f"evaluator failure: {exc}")
+            logger.warning(
+                "Relevance evaluator failed: %s. Defaulting NOT_RELEVANT.", exc,
+            )
+            return Verdict(
+                Relevance.NOT_RELEVANT, 0.0, f"evaluator failure: {exc}",
+            )
 
     @staticmethod
     def _parse_json(raw: str) -> dict:
+        """Extract the first JSON object from a possibly-noisy LLM response."""
         raw = raw.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)

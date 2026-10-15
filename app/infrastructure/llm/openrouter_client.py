@@ -171,12 +171,21 @@ class OpenRouterClient(LLMProvider):
     # ── Internals ─────────────────────────────────
 
     def _model_chain(self) -> list[str]:
-        """Ordered, de-duplicated list of models to try."""
+        """Ordered, de-duplicated list of models to try.
+
+        Adapts to the provider:
+          • If base_url points at Groq, we only use models that Groq hosts.
+          • Otherwise (OpenRouter, Together, etc.) we append the free router.
+        """
         candidates = [
             self._settings.llm_model,
             self._settings.llm_fallback_model,
-            _FREE_ROUTER,
         ]
+
+        base = self._settings.llm_base_url.lower()
+        if "groq.com" not in base:
+            candidates.append(_FREE_ROUTER)
+
         seen: set[str] = set()
         chain: list[str] = []
         for m in candidates:
@@ -266,6 +275,12 @@ class OpenRouterClient(LLMProvider):
             raise RateLimitError(f"Rate limit hit for {model}")
         if resp.status_code >= 500:
             raise LLMError(f"Server error {resp.status_code} for {model}")
+        if resp.status_code >= 400:
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = resp.text
+            logger.error("HTTP %s from %s: %s", resp.status_code, model, err_body)
         resp.raise_for_status()
 
         data = resp.json()
@@ -298,6 +313,12 @@ class OpenRouterClient(LLMProvider):
                 raise RateLimitError(f"Rate limit hit for {model}")
             if resp.status_code >= 500:
                 raise LLMError(f"Server error {resp.status_code} for {model}")
+            if resp.status_code >= 400:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
+                logger.error("HTTP %s from %s: %s", resp.status_code, model, err_body)
             resp.raise_for_status()
 
             async for line in resp.aiter_lines():

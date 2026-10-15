@@ -8,12 +8,14 @@ import streamlit as st
 
 _DEFAULTS: dict[str, Any] = {
     "session_id": None,
-    "messages": [],          # list of {"role": str, "content": str, "meta": dict}
+    "messages": [],              # list of {"role": str, "content": str, "meta": dict}
     "conv_state": "idle",
     "pending_query": None,
-    "settings": {"model": "qwen/qwen3-coder:free", "top_k": 4},
     "last_execution": None,
-    "uploads": [],
+    "uploads": [],               # list of {"name": str, "text": str}
+    "input_counter": 0,          # bumped to reset the text area after sending
+    "upload_counter": 0,         # bumped to reset the file uploader after consuming
+    "memory_profile": {},
 }
 
 
@@ -32,3 +34,6 @@ def reset_session() -> None:
     st.session_state.pending_query = None
     st.session_state.last_execution = None
     st.session_state.uploads = []
+    st.session_state.memory_profile = {}
+    st.session_state.input_counter += 1
+    st.session_state.upload_counter += 1
