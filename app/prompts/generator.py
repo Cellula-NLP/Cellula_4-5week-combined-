@@ -16,6 +16,20 @@ Rules:
 - After the code block, add a short "Explanation" section (2-5 bullets).
 - If retrieved context is provided, use it as reference but do NOT copy blindly.
 - If you are unsure, say so rather than hallucinating APIs.
+
+IMPORTANT — Always include a runnable demo:
+- For Python: end the code block with a
+
+    if __name__ == "__main__":
+        ...
+
+  section that calls the function with 2-3 representative examples
+  (including at least one edge case) and prints the results with `print()`.
+- For JavaScript: append a short demo that calls the function and uses
+  `console.log(...)`.
+- The demo must be self-contained: no external files, no network, no
+  user input. Sample data should be hardcoded.
+- This lets the user click "Run" and immediately see output.
 """
 
 

@@ -9,13 +9,21 @@ Security measures:
   • New session group (os.setsid) so we can kill the whole tree
   • Wall-clock timeout
   • Restricted environment (no network, minimal PATH)
+
+Interpreter resolution:
+  • Python: uses sys.executable so the sandbox always runs in the same
+    interpreter (and site-packages) as the parent process.
+  • Node / Bash: resolved via shutil.which() at import time.
+  • Only languages whose interpreter is actually available are registered.
 """
 from __future__ import annotations
 
 import logging
 import os
 import resource
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -26,12 +34,53 @@ from app.domain.ports import CodeRunner
 
 logger = logging.getLogger(__name__)
 
-_EXEC_COMMANDS: dict[str, list[str]] = {
-    "python": ["python", "-u"],
-    "javascript": ["node"],
-    "bash": ["bash"],
-}
 
+# ── Interpreter resolution (once at import time) ────────────────
+
+def _resolve_command(*candidates: str) -> str | None:
+    """Return the first candidate that resolves to an existing binary."""
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.isabs(candidate):
+            if os.path.exists(candidate):
+                return candidate
+        else:
+            found = shutil.which(candidate)
+            if found:
+                return found
+    return None
+
+
+# Python: prefer the current interpreter (venv-aware). Fall back to
+# python3 / python if sys.executable is somehow unavailable.
+_PYTHON_BIN = _resolve_command(
+    sys.executable or "",
+    "python3",
+    "python",
+)
+_NODE_BIN = _resolve_command("node", "nodejs")
+_BASH_BIN = _resolve_command("bash", "/bin/bash")
+
+_EXEC_COMMANDS: dict[str, list[str]] = {}
+if _PYTHON_BIN:
+    _EXEC_COMMANDS["python"] = [_PYTHON_BIN, "-u"]
+if _NODE_BIN:
+    _EXEC_COMMANDS["javascript"] = [_NODE_BIN]
+if _BASH_BIN:
+    _EXEC_COMMANDS["bash"] = [_BASH_BIN]
+
+# Directory containing the current Python interpreter — added to PATH
+# inside the sandbox so subprocesses can find venv tools (pip, etc.).
+_VENV_BIN = str(Path(sys.executable).parent) if sys.executable else ""
+
+logger.debug(
+    "Sandbox interpreters resolved — python=%s, node=%s, bash=%s",
+    _PYTHON_BIN, _NODE_BIN, _BASH_BIN,
+)
+
+
+# ── Sandbox ─────────────────────────────────────────────────────
 
 class SubprocessSandbox(CodeRunner):
     """Runs untrusted code in a locked-down subprocess."""
@@ -50,7 +99,10 @@ class SubprocessSandbox(CodeRunner):
     ) -> ExecutionResult:
         language = language.lower()
         if language not in _EXEC_COMMANDS:
-            raise ExecutionError(f"Unsupported language: {language}")
+            available = ", ".join(sorted(_EXEC_COMMANDS)) or "(none detected)"
+            raise ExecutionError(
+                f"Unsupported language: {language}. Available: {available}"
+            )
 
         timeout = timeout_s or self._timeout
         suffix = self._suffix_for(language)
@@ -59,6 +111,25 @@ class SubprocessSandbox(CodeRunner):
             path = Path(td) / f"main{suffix}"
             path.write_text(code, encoding="utf-8")
             cmd = _EXEC_COMMANDS[language] + [str(path)]
+
+            # Build the sandbox environment. Inherit TMPDIR and locale
+            # from the parent; do NOT inherit secrets (API keys etc.).
+            path_dirs = [p for p in (
+                _VENV_BIN,
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+            ) if p]
+            env = {
+                "PATH": ":".join(path_dirs),
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+                "LC_ALL": os.environ.get("LC_ALL", ""),
+                "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+                "HOME": td,
+                "VIRTUAL_ENV": os.environ.get("VIRTUAL_ENV", ""),
+            }
 
             t0 = time.perf_counter()
             try:
@@ -69,12 +140,7 @@ class SubprocessSandbox(CodeRunner):
                     timeout=timeout,
                     preexec_fn=self._apply_limits,
                     cwd=td,
-                    env={
-                        "PATH": "/usr/bin:/bin:/usr/local/bin",
-                        "PYTHONUNBUFFERED": "1",
-                        "LANG": "en_US.UTF-8",
-                        "HOME": td,
-                    },
+                    env=env,
                     check=False,
                 )
                 elapsed = int((time.perf_counter() - t0) * 1000)
@@ -95,6 +161,11 @@ class SubprocessSandbox(CodeRunner):
                     duration_ms=elapsed,
                     timed_out=True,
                 )
+            except FileNotFoundError as exc:
+                # Should not happen given the resolution above, but be explicit.
+                raise ExecutionError(
+                    f"Interpreter not found for {language}: {exc}"
+                ) from exc
             except Exception as exc:
                 raise ExecutionError(f"Sandbox failure: {exc}") from exc
 
@@ -118,4 +189,4 @@ class SubprocessSandbox(CodeRunner):
             resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
             os.setsid()  # new session → kill entire tree on timeout
         except Exception:
-            pass  # best-effort; non-POSIX platforms may not support all limits
+            pass  # best-effort; some platforms don't support every limit
