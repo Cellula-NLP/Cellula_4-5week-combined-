@@ -1,14 +1,4 @@
-"""Prompt for the relevance evaluator.
-
-Task requirement (PDF page 9): after retrieval, the documents must be
-passed to an LLM that answers:
-    "Is the retrieved context sufficiently relevant to answer the user's request?"
-Possible outputs: Relevant / Not Relevant.
-
-The evaluator must be strict enough to prevent hallucination but fair
-enough to accept related content (e.g. "reverse a string" is relevant
-when HumanEval returns other Python string helpers).
-"""
+"""Prompt for the relevance evaluator."""
 from __future__ import annotations
 
 from app.domain.models import Message, RetrievedDoc
@@ -33,12 +23,19 @@ Definition of "not_relevant":
   language, different domain, or completely unrelated topic.
 
 Decision guide:
-  • Same language + same domain (e.g. both Python string operations)  → relevant
-  • Same language + adjacent domain (e.g. Python list ops for a Python
-    string request)                                                    → relevant
-  • Different language                                                → not_relevant
-  • Completely unrelated topic (e.g. CSV parsing for a linked list)   → not_relevant
-  • Empty or placeholder documents                                    → not_relevant
+  • Same language + same domain                → relevant
+  • Same language + adjacent domain            → relevant
+  • Different language                          → not_relevant
+  • Completely unrelated topic                  → not_relevant
+  • Empty or placeholder documents              → not_relevant
+
+SPECIAL RULE — user-provided solutions:
+  If a document's `source` is "user_feedback" AND its `original_query`
+  field is present, the document was provided by the user themselves as
+  a solution for a past request. If the current request is the same or
+  very similar to `original_query`, the document IS relevant — even if
+  it is short or its language metadata looks incomplete.
+  In that case, return {"verdict": "relevant", "score": 0.9}.
 
 Scoring:
   • 0.9-1.0  : documents directly address the request
@@ -58,11 +55,14 @@ def build_relevance_prompt(query: str, docs: list[RetrievedDoc]) -> list[Message
         src = d.metadata.get("source", "unknown")
         tid = d.metadata.get("task_id", d.id)
         lang = d.metadata.get("language", "unknown")
-        # Truncate each doc so the prompt stays small and fast.
+        original = d.metadata.get("original_query", "")
         snippet = d.content[:900]
-        snippets.append(
-            f"[{i}] source={src} · language={lang} · id={tid}\n{snippet}"
-        )
+
+        header = f"[{i}] source={src} · language={lang} · id={tid}"
+        if original:
+            header += f" · original_query={original!r}"
+
+        snippets.append(f"{header}\n{snippet}")
 
     body = (
         f"User request:\n{query}\n\n"

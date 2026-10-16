@@ -44,7 +44,6 @@ class Settings(BaseSettings):
     chroma_collection: str = "coding_knowledge"
     retrieval_top_k: int = 4
     retrieval_min_score: float = 0.25
-    mmr_lambda: float = 0.7  # 1.0 = pure relevance, 0.0 = pure diversity
 
     # ── Relevance ────────────────────────────────
     relevance_threshold: float = 0.35

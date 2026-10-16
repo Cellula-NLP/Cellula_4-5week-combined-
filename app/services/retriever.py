@@ -2,18 +2,23 @@
 
 Three-stage retrieval pipeline:
   1. Bi-encoder similarity search in Chroma (over-fetch candidates).
-  2. Score threshold + MMR diversity filter.
-  3. Cross-encoder rerank to pick the final top-k.
+     Also, fetch user-provided solutions that match the *current* query
+     (their ``original_query`` must be close) so a relevant taught
+     solution can't be missed due to short-snippet embedding noise.
+  2. Score threshold filter — never drops user_feedback docs that
+     survived the similarity gate.
+  3. Cross-encoder rerank to pick the final top-k. Matching
+     user_feedback docs are always prepended to the output.
 """
 from __future__ import annotations
 
 import logging
-import math
 
 from app.core.exceptions import RetrievalError
 from app.domain.models import RetrievedDoc
 from app.domain.ports import EmbeddingProvider, VectorStore
 from app.infrastructure.tools.reranker import CrossEncoderReranker
+from app.services.query_similarity import queries_match
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +26,15 @@ logger = logging.getLogger(__name__)
 class Retriever:
     """Three-stage retrieval: fetch → filter → rerank."""
 
+    # Max number of user-provided solutions to force-include.
+    _MAX_FEEDBACK_DOCS = 3
+
     def __init__(
         self,
         embedder: EmbeddingProvider,
         vectorstore: VectorStore,
         top_k: int = 4,
         min_score: float = 0.25,
-        mmr_lambda: float = 0.7,
         reranker: CrossEncoderReranker | None = None,
         rerank_candidates: int = 20,
     ) -> None:
@@ -35,7 +42,6 @@ class Retriever:
         self._vdb = vectorstore
         self._top_k = top_k
         self._min_score = min_score
-        self._mmr_lambda = mmr_lambda
         self._reranker = reranker
         self._rerank_candidates = rerank_candidates
 
@@ -43,86 +49,105 @@ class Retriever:
         k = top_k or self._top_k
         try:
             vector = self._embedder.embed_query(query)
-            # Stage 1 — over-fetch candidates from the vector store.
-            fetch_k = max(self._rerank_candidates, k)
-            candidates = self._vdb.query(vector, top_k=fetch_k)
-            logger.info("Fetched %d candidates (top score=%.3f).",
-                        len(candidates), candidates[0].score if candidates else 0.0)
 
-            # Stage 2 — score threshold.
-            filtered = [d for d in candidates if d.score >= self._min_score]
-            if not filtered:
-                logger.info("All candidates below min_score=%.2f.", self._min_score)
+            # ── Stage 1a — over-fetch general candidates ──
+            fetch_k = max(self._rerank_candidates, k)
+            candidates = list(self._vdb.query(vector, top_k=fetch_k))
+            logger.info(
+                "Fetched %d candidates (top score=%.3f).",
+                len(candidates), candidates[0].score if candidates else 0.0,
+            )
+
+            # ── Stage 1b — matching user-provided solutions ──
+            # Only include feedback docs whose original_query matches the
+            # current request. Unrelated taught solutions must NOT be
+            # forced into the context — they would crowd out genuinely
+            # relevant results.
+            feedback_docs = self._fetch_matching_feedback_docs(vector, query)
+            if feedback_docs:
+                logger.info(
+                    "Fetched %d matching user-feedback docs.", len(feedback_docs),
+                )
+                existing_ids = {d.id for d in candidates}
+                for d in feedback_docs:
+                    if d.id not in existing_ids:
+                        candidates.append(d)
+                        existing_ids.add(d.id)
+
+            if not candidates:
                 return []
 
-            # Stage 2b — MMR diversity filter on the bi-encoder vectors.
-            diversified = self._mmr(query, filtered, limit=fetch_k)
+            # ── Stage 2 — score threshold (never drops feedback docs) ──
+            filtered = [
+                d for d in candidates
+                if d.score >= self._min_score
+                or d.metadata.get("source") == "user_feedback"
+            ]
+            if not filtered:
+                logger.info(
+                    "All candidates below min_score=%.2f.", self._min_score,
+                )
+                return []
 
-            # Stage 3 — cross-encoder rerank.
-            if self._reranker is not None:
-                final = self._reranker.rerank(query, diversified, top_k=k)
+            # ── Stage 3 — rerank non-feedback; always prepend feedback ──
+            regular = [
+                d for d in filtered
+                if d.metadata.get("source") != "user_feedback"
+            ]
+            feedback = [
+                d for d in filtered
+                if d.metadata.get("source") == "user_feedback"
+            ][: self._MAX_FEEDBACK_DOCS]
+
+            if self._reranker is not None and regular:
+                reranked = self._reranker.rerank(query, regular, top_k=k)
             else:
-                final = diversified[:k]
+                reranked = regular[:k]
 
-            logger.info("Returning %d final docs.", len(final))
+            final = (feedback + reranked)[:k]
+            logger.info(
+                "Returning %d final docs (%d feedback, %d reranked).",
+                len(final), len(feedback), len(final) - len(feedback),
+            )
             return final
         except Exception as exc:
             logger.error("Retrieval failed: %s", exc)
             raise RetrievalError(f"Retrieval failed: {exc}") from exc
 
-    # ── MMR ───────────────────────────────────────
+    # ── Internals ─────────────────────────────────
 
-    def _mmr(
+    def _fetch_matching_feedback_docs(
         self,
+        vector: list[float],
         query: str,
-        docs: list[RetrievedDoc],
-        limit: int,
     ) -> list[RetrievedDoc]:
-        """Maximal Marginal Relevance — balance relevance and diversity.
+        """Fetch user-feedback docs whose original_query matches ``query``.
 
-        Requires each doc to have an embedding. If embeddings are missing
-        (e.g. Chroma didn't return them), skips MMR and returns input.
+        Falls back to an empty list if the vector store doesn't support
+        metadata filters (e.g. the in-memory degraded mode).
         """
-        if not docs or all(d.embedding is None for d in docs):
-            return docs
-        if len(docs) <= limit:
-            return docs
+        try:
+            docs = self._vdb.query(
+                vector,
+                top_k=self._MAX_FEEDBACK_DOCS,
+                filters={"source": "user_feedback"},
+            )
+        except Exception as exc:
+            logger.debug("Feedback-filtered query skipped: %s", exc)
+            return []
 
-        selected: list[RetrievedDoc] = []
-        remaining = list(docs)
-
-        # Seed with the highest-scoring doc.
-        remaining.sort(key=lambda d: d.score, reverse=True)
-        selected.append(remaining.pop(0))
-
-        while remaining and len(selected) < limit:
-            best_doc = None
-            best_score = -math.inf
-            for d in remaining:
-                if d.embedding is None:
-                    continue
-                relevance = d.score
-                # Max similarity to already-selected docs.
-                max_sim = 0.0
-                for s in selected:
-                    if s.embedding is None:
-                        continue
-                    sim = self._cosine(d.embedding, s.embedding)
-                    max_sim = max(max_sim, sim)
-                mmr = self._mmr_lambda * relevance - (1 - self._mmr_lambda) * max_sim
-                if mmr > best_score:
-                    best_score = mmr
-                    best_doc = d
-            if best_doc is None:
-                break
-            selected.append(best_doc)
-            remaining.remove(best_doc)
-
-        return selected
-
-    @staticmethod
-    def _cosine(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a)) or 1.0
-        nb = math.sqrt(sum(y * y for y in b)) or 1.0
-        return dot / (na * nb)
+        kept: list[RetrievedDoc] = []
+        for d in docs:
+            original = (d.metadata.get("original_query") or "").strip()
+            if not original:
+                # No signal about what this doc is for → drop it.
+                continue
+            if queries_match(query, original):
+                kept.append(d)
+            else:
+                logger.debug(
+                    "Dropping unrelated feedback doc %s "
+                    "(query=%r vs original_query=%r).",
+                    d.id, query[:60], original[:60],
+                )
+        return kept

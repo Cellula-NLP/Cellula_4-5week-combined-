@@ -7,14 +7,11 @@ _CSS = """
 <style>
 /* ── Theme tokens ─────────────────────────────────────── */
 :root {
-    --teal-50:  #f0fdfa;
-    --teal-100: #ccfbf1;
     --teal-200: #99f6e4;
     --teal-300: #5eead4;
     --teal-400: #2dd4bf;
     --teal-500: #14b8a6;
     --teal-600: #0d9488;
-    --teal-700: #0f766e;
 
     --bg-deep:     #0a1620;
     --bg-surface:  #0f2231;
@@ -29,10 +26,8 @@ _CSS = """
     --border-strong: rgba(45, 212, 191, 0.35);
     --glow:          rgba(45, 212, 191, 0.18);
 
-    --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 18px;
-    --radius-pill: 999px;
 
     --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }

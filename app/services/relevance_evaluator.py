@@ -4,10 +4,14 @@ Task requirement (PDF page 9): ask an LLM whether the retrieved
 context is sufficiently relevant. If not, the pipeline must not
 hallucinate — it should ask the user for the correct solution.
 
-Optimization: if the top retrieved score is below a hard cutoff
-(default 0.15), we skip the LLM call and return NOT_RELEVANT
-immediately. This saves quota and latency without changing the
-user-visible outcome.
+Two shortcuts:
+  • If any doc is a user-provided solution whose original_query matches
+    the current request, trust it and return RELEVANT without an LLM call.
+  • If the top bi-encoder score is below a hard cutoff, return
+    NOT_RELEVANT immediately without an LLM call. The cutoff is set at
+    the retriever's ``min_score`` so it fires only when the candidate
+    set consists of low-score feedback docs that slipped through the
+    similarity gate (see Retriever._fetch_matching_feedback_docs).
 """
 from __future__ import annotations
 
@@ -19,13 +23,16 @@ from app.domain.enums import Relevance
 from app.domain.models import RetrievedDoc, Verdict
 from app.domain.ports import LLMProvider
 from app.prompts.relevance import build_relevance_prompt
+from app.services.query_similarity import queries_match
 
 logger = logging.getLogger(__name__)
 
 
 class RelevanceEvaluator:
-    # Below this bi-encoder score, skip the LLM call.
-    _HARD_CUTOFF = 0.15
+    # Below this bi-encoder score, skip the LLM call. Matches the
+    # retriever's min_score so we never call the evaluator when the
+    # candidate set is uniformly weak.
+    _HARD_CUTOFF = 0.25
 
     def __init__(
         self,
@@ -39,7 +46,22 @@ class RelevanceEvaluator:
         if not docs:
             return Verdict(Relevance.NOT_RELEVANT, 0.0, "no documents retrieved")
 
-        # Short-circuit: obviously weak retrieval — skip the LLM call.
+        # Shortcut 1 — user-feedback doc matching the current query.
+        for d in docs:
+            if d.metadata.get("source") != "user_feedback":
+                continue
+            original = (d.metadata.get("original_query") or "").strip()
+            if original and queries_match(query, original):
+                logger.info(
+                    "User-feedback doc matches the current query — "
+                    "short-circuiting relevance check."
+                )
+                return Verdict(
+                    Relevance.RELEVANT, 1.0,
+                    "user-provided solution for matching query",
+                )
+
+        # Shortcut 2 — obviously weak retrieval.
         top_score = max(d.score for d in docs)
         if top_score < self._HARD_CUTOFF:
             logger.info(

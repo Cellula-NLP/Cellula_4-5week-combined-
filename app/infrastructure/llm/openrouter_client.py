@@ -90,12 +90,12 @@ class OpenRouterClient(LLMProvider):
     # ── Public API ────────────────────────────────
 
     async def complete(
-        self,
-        messages: Sequence[Message],
-        *,
-        json_mode: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
+            self,
+            messages: Sequence[Message],
+            *,
+            json_mode: bool = False,
+            temperature: float | None = None,
+            max_tokens: int | None = None,
     ) -> str:
         """Non-streamed completion with cache + fallback chain."""
         cache_key = self._make_cache_key(
@@ -104,8 +104,10 @@ class OpenRouterClient(LLMProvider):
         if cache_key is not None:
             cached = self._cache_get(cache_key)
             if cached is not None:
-                logger.debug("LLM cache hit (%d chars).", len(cached))
+                # Visible at INFO so users can verify caching in the terminal.
+                logger.info("LLM cache HIT (%d chars).", len(cached))
                 return cached
+            logger.info("LLM cache MISS — will call model.")
 
         last_exc: Exception | None = None
         for model in self._model_chain():

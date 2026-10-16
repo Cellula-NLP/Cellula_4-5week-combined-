@@ -89,6 +89,11 @@ class SubprocessSandbox(CodeRunner):
         self._timeout = default_timeout_s
         self._mem_bytes = mem_mb * 1024 * 1024
 
+    @property
+    def available_languages(self) -> frozenset[str]:
+        """Canonical languages whose interpreter was found at import time."""
+        return frozenset(_EXEC_COMMANDS.keys())
+
     def run(
         self,
         code: str,
@@ -162,7 +167,6 @@ class SubprocessSandbox(CodeRunner):
                     timed_out=True,
                 )
             except FileNotFoundError as exc:
-                # Should not happen given the resolution above, but be explicit.
                 raise ExecutionError(
                     f"Interpreter not found for {language}: {exc}"
                 ) from exc

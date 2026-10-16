@@ -92,7 +92,6 @@ def _build_orchestrator(settings):
         embedder, vdb,
         top_k=settings.retrieval_top_k,
         min_score=settings.retrieval_min_score,
-        mmr_lambda=settings.mmr_lambda,
         reranker=reranker,
         rerank_candidates=settings.rerank_candidates,
     )
@@ -131,7 +130,7 @@ def get_runtime():
 
 # ── Header ──────────────────────────────────────────────
 
-def _render_header(vdb, memory) -> None:
+def _render_header(memory) -> None:
     left, right = st.columns([10, 1], gap="small", vertical_alignment="center")
     with left:
         st.markdown(
@@ -262,7 +261,7 @@ def main() -> None:
 
     orchestrator, executor, memory, vdb = get_runtime()
 
-    _render_header(vdb, memory)
+    _render_header(memory)
     render_history(executor)
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)

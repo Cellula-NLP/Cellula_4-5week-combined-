@@ -31,6 +31,12 @@ _EXPLAIN_VERBS = (
     "what's wrong", "whats wrong", "help me understand",
 )
 
+_AMBIGUOUS_IMPERATIVES = (
+    "fix it", "fix this", "solve it", "solve this",
+    "change it", "update it", "improve it",
+    "make it better", "do it", "handle it",
+)
+
 
 class IntentClassifier:
     """Classifies a user query into an Intent."""
@@ -100,6 +106,14 @@ class IntentClassifier:
 
     def _heuristic(self, query: str, code: str | None) -> Classification | None:
         ql = query.lower()
+
+        # Bare imperatives with no code → ask the user what they want.
+        if not code and ql in _AMBIGUOUS_IMPERATIVES:
+            return Classification(
+                Intent.CLARIFY, 0.85,
+                reasoning="ambiguous bare imperative with no code",
+            )
+
         has_gen = any(v in ql for v in _GEN_VERBS)
         has_exp = any(v in ql for v in _EXPLAIN_VERBS)
 

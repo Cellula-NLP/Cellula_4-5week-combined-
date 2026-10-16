@@ -26,6 +26,25 @@ class IngestionService:
         self._vdb = vectorstore
         self._chunker = chunker
 
+    # ── Public API ────────────────────────────────
+
+    @staticmethod
+    def hash_text(text: str) -> str:
+        """Compute the same content hash used by ingest_solution()."""
+        return hashlib.sha256((text or "").strip().encode()).hexdigest()
+
+    def is_duplicate(self, solution_text: str) -> bool:
+        """True if this exact solution is already stored in the KB.
+
+        Used by the orchestrator for an early check that works in any
+        FSM state — so pasting a solution twice gives "already have it"
+        instead of routing to explain.
+        """
+        text = (solution_text or "").strip()
+        if len(text) < 20:
+            return False
+        return bool(self._vdb.query_by_hash(self.hash_text(text)))
+
     def ingest_solution(
         self,
         session_id: str,
@@ -37,7 +56,7 @@ class IngestionService:
         if len(text) < 20:
             return IngestResult(False, "Solution is too short to be useful.")
 
-        content_hash = hashlib.sha256(text.encode()).hexdigest()
+        content_hash = self.hash_text(text)
 
         # Deduplication check.
         if self._vdb.query_by_hash(content_hash):

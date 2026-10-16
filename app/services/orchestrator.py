@@ -78,12 +78,7 @@ def _extract_code(text: str) -> str | None:
 
 
 def _extract_code_for_ingestion(text: str) -> str:
-    """Pull code out of a user-provided solution.
-
-    Prefers a fenced block, then any line that looks like code (with all
-    following lines). If nothing looks like code, returns the text as-is
-    so short natural-language solutions still get stored.
-    """
+    """Pull code out of a user-provided solution."""
     text = (text or "").strip()
     if not text:
         return text
@@ -104,10 +99,8 @@ def _strip_fences(text: str) -> str:
     return _CODE_FENCE.sub("", text).strip()
 
 
-# ── Solution detection (smarter, question-aware) ─────────────────
+# ── Solution detection ──────────────────────────────────────────
 
-# Markers that indicate the user is asking a *question*, not providing
-# a solution. These override any "looks like code" signal.
 _QUESTION_MARKERS: tuple[str, ...] = (
     "explain", "what does", "what is", "what are", "what's", "whats",
     "why is", "why does", "why do", "why my",
@@ -119,7 +112,6 @@ _QUESTION_MARKERS: tuple[str, ...] = (
 
 
 def _strip_attached_files(text: str) -> str:
-    """Remove fenced blocks (e.g. attached file content) from a message."""
     return _CODE_FENCE.sub("", text).strip()
 
 
@@ -129,25 +121,22 @@ def _has_question_marker(text: str) -> bool:
 
 
 def _looks_like_solution(text: str) -> bool:
-    """Detect whether a user message is a *solution* rather than a question.
-
-    Only returns True if the user's own words (excluding attached file
-    content) look like a solution rather than a follow-up question.
-    """
+    """Detect whether a user message is a *solution* rather than a question."""
     if not text or not text.strip():
         return False
 
     user_words = _strip_attached_files(text)
-
     if not user_words:
         return False
 
     if _has_question_marker(user_words):
         return False
 
-    if "```" in text and len(text) > 60 and not _has_question_marker(user_words):
-        if len(user_words) < 30:
-            return True
+    if _looks_like_snippet(user_words):
+        return True
+
+    if "```" in text and len(text) > 60 and len(user_words) < 30:
+        return True
 
     tl = user_words.lower()
     markers = (
@@ -178,11 +167,6 @@ _SMALLTALK_GOODBYES = frozenset({
 
 
 def _handle_smalltalk(text: str) -> str | None:
-    """Return a friendly reply for greetings/thanks/goodbyes, else None.
-
-    These messages bypass intent classification entirely so the app
-    doesn't reply to "hi" with a coding-related prompt.
-    """
     if not text or not text.strip():
         return None
 
@@ -204,8 +188,6 @@ def _handle_smalltalk(text: str) -> str | None:
 
     return None
 
-
-# ── Orchestrator ────────────────────────────────────────────────
 
 class ConversationOrchestrator:
     """Stateless coordinator. Per-session state lives in MemoryStore."""
@@ -243,7 +225,6 @@ class ConversationOrchestrator:
         session_id: str,
         user_input: str,
     ) -> AsyncIterator[StreamEvent]:
-        # ── Input guard ──────────────────────────
         if not user_input or not user_input.strip():
             yield StreamEvent.error("Your message is empty. Please type something.")
             yield StreamEvent.done()
@@ -253,8 +234,6 @@ class ConversationOrchestrator:
             user_input = user_input[: self._settings.max_input_chars]
             logger.warning("Input truncated to %d chars.", self._settings.max_input_chars)
 
-        # ── Small-talk fast path ─────────────────
-        # Greetings, thanks, and goodbyes bypass classification entirely.
         smalltalk = _handle_smalltalk(user_input)
         if smalltalk is not None:
             self._memory.add_user(session_id, user_input)
@@ -264,7 +243,22 @@ class ConversationOrchestrator:
             yield StreamEvent.done()
             return
 
-        # ── Clarification recovery ───────────────
+        # ── Duplicate-solution check (state-agnostic) ────
+        if _looks_like_solution(user_input):
+            candidate_code = _extract_code_for_ingestion(user_input)
+            if candidate_code and self._ingestion.is_duplicate(candidate_code):
+                logger.info("Duplicate solution detected — short-circuiting.")
+                self._state_store[session_id] = ConvState.IDLE
+                self._memory.update_preferences(
+                    session_id, pending_query=None, pending_code=None,
+                )
+                self._memory.add_user(session_id, user_input)
+                msg = "I already have this solution — thanks!"
+                self._memory.add_assistant(session_id, msg)
+                yield StreamEvent.message(msg)
+                yield StreamEvent.done()
+                return
+
         resolved = self._try_resolve_clarification(session_id, user_input)
         if resolved is not None:
             classification, recovered_code, recovered_query = resolved
@@ -291,26 +285,51 @@ class ConversationOrchestrator:
         if self._state_store.get(session_id) == ConvState.AWAITING_SOLUTION:
             if _looks_like_solution(user_input):
                 code_to_ingest = _extract_code_for_ingestion(user_input)
-                pending_query = self._memory.profile(session_id).get("pending_query", "")
 
-                result = self._ingestion.ingest_solution(
-                    session_id=session_id,
-                    solution_text=code_to_ingest,
-                    original_query=pending_query,
+                profile = self._memory.profile(session_id)
+                pending_query = (profile.get("pending_query") or "").strip()
+                pending_language = profile.get("language") or None
+
+                logger.info(
+                    "Ingesting user solution (chars=%d, lang=%s, query=%r)",
+                    len(code_to_ingest), pending_language, pending_query[:80],
                 )
+
+                # Ingestion is the last hop in the learning loop — if it
+                # fails, we still clear the FSM state so the user isn't
+                # stuck waiting for a solution.
+                try:
+                    result = self._ingestion.ingest_solution(
+                        session_id=session_id,
+                        solution_text=code_to_ingest,
+                        original_query=pending_query,
+                        language=pending_language,
+                    )
+                    response_msg = result.message
+                    logger.info("Ingestion result: %s", result.message)
+                except Exception as exc:
+                    logger.exception("Ingestion failed")
+                    response_msg = (
+                        "I couldn't store your solution right now — "
+                        "something went wrong on my side. Your message is "
+                        "saved in the conversation, but the knowledge base "
+                        "wasn't updated."
+                    )
+
                 self._state_store[session_id] = ConvState.IDLE
-                self._memory.add_assistant(session_id, result.message)
-                yield StreamEvent.message(result.message)
+                self._memory.update_preferences(
+                    session_id, pending_query=None, pending_code=None,
+                )
+                self._memory.add_user(session_id, user_input)
+                self._memory.add_assistant(session_id, response_msg)
+                yield StreamEvent.message(response_msg)
                 yield StreamEvent.done()
                 return
-            # User asked something new → drop the state and process normally.
             logger.info("AWAITING_SOLUTION cleared: not a solution.")
             self._state_store[session_id] = ConvState.IDLE
 
-        # ── Persist user turn ────────────────────
         self._memory.add_user(session_id, user_input)
 
-        # ── Extract code + classify ──────────────
         code = _extract_code(user_input)
         clean_query = _strip_fences(user_input) or user_input
 
@@ -335,13 +354,11 @@ class ConversationOrchestrator:
             classification.intent, classification.confidence,
         )
 
-        # ── Persist preferences ──────────────────
         if classification.language:
             self._memory.set_language(session_id, classification.language)
         for fw in detect_frameworks(user_input):
             self._memory.add_framework(session_id, fw)
 
-        # ── CLARIFY ──────────────────────────────
         if classification.intent == Intent.CLARIFY:
             self._state_store[session_id] = ConvState.AWAITING_CLARIFICATION
             self._memory.update_preferences(
@@ -359,7 +376,6 @@ class ConversationOrchestrator:
             yield StreamEvent.done()
             return
 
-        # ── OUT_OF_SCOPE ─────────────────────────
         if classification.intent == Intent.OUT_OF_SCOPE:
             msg = (
                 "I'm specialized in programming tasks — code generation and "
@@ -370,9 +386,6 @@ class ConversationOrchestrator:
             yield StreamEvent.done()
             return
 
-        # ── Recover code from history if needed ──
-        # The user may say "explain it in 5 sentences" referring to code
-        # from a previous assistant turn rather than the current message.
         if classification.intent == Intent.EXPLAIN_CODE and not code:
             recovered = self._find_recent_code_in_history(session_id)
             if recovered:
@@ -382,7 +395,6 @@ class ConversationOrchestrator:
                     len(code),
                 )
 
-        # ── Dispatch ─────────────────────────────
         async for event in self._dispatch(
             session_id=session_id,
             query=user_input,
@@ -407,8 +419,6 @@ class ConversationOrchestrator:
             yield StreamEvent.done()
             return
 
-        # Emit the classified intent so the UI can decide how to render
-        # the response (e.g. show Run buttons only for generated code).
         yield StreamEvent.meta({
             "stage": "intent",
             "intent": classification.intent.value,
@@ -427,7 +437,18 @@ class ConversationOrchestrator:
             ):
                 if event.kind == "state_change":
                     try:
-                        self._state_store[session_id] = ConvState(event.payload)
+                        new_state = ConvState(event.payload)
+                        self._state_store[session_id] = new_state
+                        if new_state == ConvState.AWAITING_SOLUTION:
+                            self._memory.update_preferences(
+                                session_id,
+                                pending_query=query,
+                                pending_code=code or "",
+                            )
+                            logger.info(
+                                "AWAITING_SOLUTION set — pending_query=%r",
+                                query[:80],
+                            )
                     except ValueError:
                         logger.warning(
                             "Unknown state_change payload: %s", event.payload,
@@ -485,14 +506,11 @@ class ConversationOrchestrator:
         )
         return None
 
-    # ── Code recovery from history ────────────────
-
     def _find_recent_code_in_history(
         self,
         session_id: str,
         lookback: int = _CODE_RECOVERY_LOOKBACK,
     ) -> str | None:
-        """Return the most recent fenced code block from assistant turns."""
         try:
             history = self._memory.full_history(session_id, limit=lookback)
         except Exception as exc:

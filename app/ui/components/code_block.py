@@ -6,6 +6,10 @@ snippets that are meant to be read, not executed — showing Run
 buttons under them is misleading (many are fragments that produce
 no output or reference undefined names).
 
+Additionally, Run buttons are hidden for any language the sandbox
+cannot actually execute (e.g. JavaScript when ``node`` isn't
+installed). The set is read from ``executor.available_languages``.
+
 Key implementation details:
   • Button keys are deterministic (based on snippet_id), so Streamlit
     recognizes clicks across reruns.
@@ -21,7 +25,11 @@ import streamlit as st
 from app.domain.models import ExecutionResult
 
 _CODE_FENCE = re.compile(r"```([a-zA-Z0-9_+\-]*)\n(.*?)```", re.DOTALL)
-_RUNNABLE = {"python", "javascript", "bash", "py", "js", "sh"}
+
+# Canonical names the UI knows how to render a Run button for. The actual
+# gate is executor.available_languages — this set is only the fallback
+# when the executor can't tell us (degraded mode / older interface).
+_RUNNABLE_FALLBACK = frozenset({"python", "javascript", "bash"})
 
 
 # ── Reply parsing ──────────────────────────────────
@@ -42,12 +50,16 @@ def render_reply_controls(
     if not show_run or not markdown_text or executor is None:
         return
 
+    # Ask the executor which languages it can actually run. If it can't
+    # tell us, fall back to the conservative default set.
+    available = getattr(executor, "available_languages", None) or _RUNNABLE_FALLBACK
+
     matches = list(_CODE_FENCE.finditer(markdown_text))
     for i, match in enumerate(matches):
         lang_raw = (match.group(1) or "").strip().lower()
         code = match.group(2)
         lang = _normalize_language(_infer_language(lang_raw, code))
-        if lang not in _RUNNABLE:
+        if lang not in available:
             continue
 
         snippet_id = f"{message_id}:snippet{i}"

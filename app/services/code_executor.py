@@ -13,6 +13,16 @@ class CodeExecutor:
     def __init__(self, runner: CodeRunner) -> None:
         self._runner = runner
 
+    @property
+    def available_languages(self) -> frozenset[str]:
+        """Languages the underlying runner can actually execute.
+
+        Used by the UI to gate Run buttons — a code block in a language
+        whose interpreter isn't installed must not show a Run button.
+        Falls back to an empty set if the runner doesn't advertise any.
+        """
+        return getattr(self._runner, "available_languages", frozenset())
+
     def execute(
         self,
         code: str,

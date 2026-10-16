@@ -6,10 +6,9 @@ Task-compliant flow (PDF pages 7, 9, 10):
     └─ NOT_RELEVANT → do NOT hallucinate; ask the user for the correct
                       solution so it can be ingested for future use.
 
-The "not relevant" branch follows PDF page 10 literally: the assistant
-does not generate anything from general training when the retrieved
-context is insufficient. It asks the user to provide a solution, which
-the ingestion service will then embed and store in Chroma.
+Retrieval *failure* (Chroma down, embedder error, …) is treated as an
+infra issue, not a knowledge gap: we tell the user and generate from
+general knowledge rather than asking them for a solution.
 
 Follow-up handling:
   Short follow-ups like "now add error handling" are rewritten with
@@ -58,15 +57,36 @@ class GeneratePipeline(Pipeline):
         yield StreamEvent.meta({"stage": "rewritten_query", "value": retrieval_query})
 
         # ── 2) Retrieve from Chroma ───────────────
+        retrieval_failed = False
+        docs: list = []
         try:
             docs = self._retriever.retrieve(retrieval_query, top_k=context.top_k)
         except Exception as exc:
             logger.error("Retrieval failed: %s", exc)
+            retrieval_failed = True
+
+        # ── 2a) Retrieval failure → degrade, don't ask for a solution ──
+        if retrieval_failed:
+            yield StreamEvent.meta({
+                "stage": "relevance",
+                "verdict": "unknown",
+                "score": 0.0,
+                "docs": [],
+                "reason": "retrieval_failed",
+            })
             yield StreamEvent.message(
-                "I had trouble searching my knowledge base. "
-                "I'll try to answer from general knowledge."
+                "I couldn't reach my knowledge base just now, so I'll "
+                "answer from general knowledge instead.\n\n"
             )
-            docs = []
+            async for event in self._generator.stream(
+                query=query,
+                docs=[],
+                session_id=session_id,
+                language=context.language,
+            ):
+                yield event
+            yield StreamEvent.done()
+            return
 
         # ── 3) Relevance check ────────────────────
         if not docs:
