@@ -1,4 +1,9 @@
-"""Main coordinator: state machine + classification + routing."""
+"""Main coordinator: state machine + classification + routing.
+
+Invariant: every internal state transition emits a matching
+``StreamEvent.state_change`` so the UI's ``conv_state`` never drifts
+from the orchestrator's source of truth.
+"""
 from __future__ import annotations
 
 import logging
@@ -51,7 +56,6 @@ def _looks_like_snippet(text: str) -> bool:
 
 
 def _extract_code(text: str) -> str | None:
-    """Extract code from a user message."""
     if not text or not text.strip():
         return None
 
@@ -78,7 +82,6 @@ def _extract_code(text: str) -> str | None:
 
 
 def _extract_code_for_ingestion(text: str) -> str:
-    """Pull code out of a user-provided solution."""
     text = (text or "").strip()
     if not text:
         return text
@@ -121,7 +124,6 @@ def _has_question_marker(text: str) -> bool:
 
 
 def _looks_like_solution(text: str) -> bool:
-    """Detect whether a user message is a *solution* rather than a question."""
     if not text or not text.strip():
         return False
 
@@ -190,7 +192,7 @@ def _handle_smalltalk(text: str) -> str | None:
 
 
 class ConversationOrchestrator:
-    """Stateless coordinator. Per-session state lives in MemoryStore."""
+    """Stateless coordinator. Per-session state lives in ``state_store``."""
 
     _EXPLAIN_CHOICES: frozenset[str] = frozenset({
         "explain", "explain the code", "explain code", "explain it",
@@ -220,6 +222,12 @@ class ConversationOrchestrator:
         self._ingestion = ingestion
         self._state_store = state_store
 
+    # ── Public API ────────────────────────────────
+
+    def get_state(self, session_id: str) -> ConvState:
+        """Current FSM state for a session (UI helper)."""
+        return self._state_store.get(session_id, ConvState.IDLE)
+
     async def handle(
         self,
         session_id: str,
@@ -248,7 +256,7 @@ class ConversationOrchestrator:
             candidate_code = _extract_code_for_ingestion(user_input)
             if candidate_code and self._ingestion.is_duplicate(candidate_code):
                 logger.info("Duplicate solution detected — short-circuiting.")
-                self._state_store[session_id] = ConvState.IDLE
+                yield self._transition(session_id, ConvState.IDLE)
                 self._memory.update_preferences(
                     session_id, pending_query=None, pending_code=None,
                 )
@@ -262,6 +270,10 @@ class ConversationOrchestrator:
         resolved = self._try_resolve_clarification(session_id, user_input)
         if resolved is not None:
             classification, recovered_code, recovered_query = resolved
+
+            # _try_resolve_clarification reset state internally — mirror it.
+            yield self._transition(session_id, ConvState.IDLE)
+
             self._memory.add_user(session_id, user_input)
 
             if classification.intent == Intent.EXPLAIN_CODE and not recovered_code:
@@ -295,9 +307,6 @@ class ConversationOrchestrator:
                     len(code_to_ingest), pending_language, pending_query[:80],
                 )
 
-                # Ingestion is the last hop in the learning loop — if it
-                # fails, we still clear the FSM state so the user isn't
-                # stuck waiting for a solution.
                 try:
                     result = self._ingestion.ingest_solution(
                         session_id=session_id,
@@ -307,7 +316,7 @@ class ConversationOrchestrator:
                     )
                     response_msg = result.message
                     logger.info("Ingestion result: %s", result.message)
-                except Exception as exc:
+                except Exception:
                     logger.exception("Ingestion failed")
                     response_msg = (
                         "I couldn't store your solution right now — "
@@ -316,7 +325,8 @@ class ConversationOrchestrator:
                         "wasn't updated."
                     )
 
-                self._state_store[session_id] = ConvState.IDLE
+                # Reset state and tell the UI, in that order.
+                yield self._transition(session_id, ConvState.IDLE)
                 self._memory.update_preferences(
                     session_id, pending_query=None, pending_code=None,
                 )
@@ -325,8 +335,10 @@ class ConversationOrchestrator:
                 yield StreamEvent.message(response_msg)
                 yield StreamEvent.done()
                 return
+
+            # Not a solution → clear the wait so the next turn routes normally.
             logger.info("AWAITING_SOLUTION cleared: not a solution.")
-            self._state_store[session_id] = ConvState.IDLE
+            yield self._transition(session_id, ConvState.IDLE)
 
         self._memory.add_user(session_id, user_input)
 
@@ -360,7 +372,7 @@ class ConversationOrchestrator:
             self._memory.add_framework(session_id, fw)
 
         if classification.intent == Intent.CLARIFY:
-            self._state_store[session_id] = ConvState.AWAITING_CLARIFICATION
+            yield self._transition(session_id, ConvState.AWAITING_CLARIFICATION)
             self._memory.update_preferences(
                 session_id,
                 pending_code=code or "",
@@ -459,6 +471,19 @@ class ConversationOrchestrator:
             yield StreamEvent.error(f"Something went wrong: {exc}")
             yield StreamEvent.done()
 
+    # ── Internals ─────────────────────────────────
+
+    def _transition(self, session_id: str, state: ConvState) -> StreamEvent:
+        """Update internal state AND emit a matching UI event.
+
+        This is the only place the orchestrator mutates its own FSM state.
+        Pipelines still emit their own state_changes; ``_dispatch`` mirrors
+        them into ``_state_store`` for us.
+        """
+        self._state_store[session_id] = state
+        logger.debug("FSM → %s (session %s)", state.value, session_id[:8])
+        return StreamEvent.state_change(state.value)
+
     def _try_resolve_clarification(
         self,
         session_id: str,
@@ -472,7 +497,8 @@ class ConversationOrchestrator:
         pending_code = (profile.get("pending_code") or "").strip() or None
         pending_query = (profile.get("pending_query") or "").strip()
 
-        self._state_store[session_id] = ConvState.IDLE
+        # Note: we do NOT mutate state here. The caller emits the
+        # matching ``state_change`` event so the UI stays in sync.
         self._memory.update_preferences(
             session_id, pending_code=None, pending_query=None,
         )

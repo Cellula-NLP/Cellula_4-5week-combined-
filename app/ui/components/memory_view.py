@@ -18,10 +18,14 @@ _LANGUAGES = [
 ]
 
 
-def render_memory_popover(memory) -> None:
-    """Render the memory popover (triggered from the header)."""
-    # Clean, neutral icon — no brain emoji. The gear suggests "preferences",
-    # which is exactly what this panel lets the user edit.
+def render_memory_popover(memory, orchestrator=None) -> None:
+    """Render the memory popover (triggered from the header).
+
+    ``orchestrator`` must be the *live* ConversationOrchestrator instance
+    so we can read the FSM state from the source of truth. If it's missing
+    or doesn't expose ``get_state``, we fall back to the cached
+    ``st.session_state.conv_state`` value.
+    """
     with st.popover("⚙", help="Session memory & preferences"):
         sid = st.session_state.get("session_id", "")
         msgs = st.session_state.get("messages", [])
@@ -36,7 +40,19 @@ def render_memory_popover(memory) -> None:
         user_turns = sum(1 for m in msgs if m.get("role") == "user")
         c1, c2 = st.columns(2)
         c1.metric("Turns", user_turns)
-        c2.metric("State", st.session_state.get("conv_state", "idle"))
+
+        # Prefer live state from the orchestrator; fall back to the cached
+        # value in session_state if the orchestrator can't provide it.
+        live_state = None
+        if orchestrator is not None and hasattr(orchestrator, "get_state"):
+            try:
+                live_state = orchestrator.get_state(sid).value
+            except Exception:
+                live_state = None
+        if live_state is None:
+            live_state = st.session_state.get("conv_state", "idle")
+
+        c2.metric("State", live_state)
 
         st.divider()
 
@@ -67,7 +83,11 @@ def render_memory_popover(memory) -> None:
                         memory.remove_framework(sid, fw)
                         st.rerun()
         else:
-            st.caption("_None detected yet — mention a framework and it'll appear here._")
+            st.caption(
+                "_None detected yet — mention a framework like FastAPI, "
+                "React, or Django and it'll appear here. Language "
+                "preferences are above._"
+            )
 
         st.divider()
 

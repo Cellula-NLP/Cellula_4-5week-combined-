@@ -29,7 +29,6 @@ _THINKING_HTML = (
 _CURSOR_HTML = '<span class="streaming-cursor"></span>'
 
 # Friendly labels for internal pipeline stages (from StreamEvent.meta).
-# Only stages that pipelines actually emit are listed here.
 _STAGE_LABELS = {
     "rewritten_query": "Analyzing request",
     "relevance": "Checking knowledge base",
@@ -130,7 +129,8 @@ def get_runtime():
 
 # ── Header ──────────────────────────────────────────────
 
-def _render_header(memory) -> None:
+def _render_header(memory, orchestrator) -> None:
+    """Render the app header. ``orchestrator`` is the live instance, not the module."""
     left, right = st.columns([10, 1], gap="small", vertical_alignment="center")
     with left:
         st.markdown(
@@ -146,7 +146,7 @@ def _render_header(memory) -> None:
             unsafe_allow_html=True,
         )
     with right:
-        render_memory_popover(memory)
+        render_memory_popover(memory, orchestrator)
     st.markdown("<div class='header-rule'></div>", unsafe_allow_html=True)
 
 
@@ -259,9 +259,10 @@ def main() -> None:
     inject_styles()
     init_state()
 
+    # get_runtime() returns the LIVE instance, not the module.
     orchestrator, executor, memory, vdb = get_runtime()
 
-    _render_header(memory)
+    _render_header(memory, orchestrator)
     render_history(executor)
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
