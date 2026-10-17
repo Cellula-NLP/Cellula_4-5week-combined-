@@ -226,3 +226,6 @@ __marimo__/
 data/chroma/
 data/sessions.db
 data/uploads/
+
+APPROACH.md
+ARCHITECTURE.md

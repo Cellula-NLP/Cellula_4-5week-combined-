@@ -1,27 +1,4 @@
 """OpenRouter LLM client (OpenAI-compatible API).
-
-Model strategy:
-  1. Primary model   (settings.llm_model)
-  2. Fallback model  (settings.llm_fallback_model)
-  3. Free Models Router ("openrouter/free") — automatically selects any
-     available free model. This is the ultimate safety net so the app
-     never breaks when individual free model IDs are removed/changed.
-
-Handles:
-  • 404 (model not found)      → try next model
-  • 429 (rate limit)           → tenacity retry + try next model
-  • 5xx (server error)         → retry + try next model
-  • Timeouts / connect errors  → retry + try next model
-  • Malformed JSON responses   → LLMError
-  • Empty content              → treated as transient, try next model
-  • Streaming SSE parsing      → robust against partial chunks
-
-Caching (Win C):
-  • Non-streamed completions are cached by a hash of (model chain,
-    messages, temperature, JSON_mode, max_tokens).
-  • Bounded LRU-style cache prevents unbounded memory growth.
-  • Thread-safe (Streamlit runs scripts in worker threads).
-  • Streaming responses are NOT cached (they'd need full buffering).
 """
 from __future__ import annotations
 
