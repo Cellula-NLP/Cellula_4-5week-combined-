@@ -1,21 +1,4 @@
-"""Run button + reply-code-parsing utilities with persistent results.
-
-Run buttons appear ONLY for responses that contain *generated* code
-(the Generate route). Explanation responses contain illustrative
-snippets that are meant to be read, not executed — showing Run
-buttons under them is misleading (many are fragments that produce
-no output or reference undefined names).
-
-Additionally, Run buttons are hidden for any language the sandbox
-cannot actually execute (e.g. JavaScript when ``node`` isn't
-installed). The set is read from ``executor.available_languages``.
-
-Key implementation details:
-  • Button keys are deterministic (based on snippet_id), so Streamlit
-    recognizes clicks across reruns.
-  • Execution results are stored in st.session_state keyed by
-    snippet_id, so they survive reruns.
-"""
+"""Run button + reply-code-parsing utilities with persistent results."""
 from __future__ import annotations
 
 import re
@@ -26,13 +9,9 @@ from app.domain.models import ExecutionResult
 
 _CODE_FENCE = re.compile(r"```([a-zA-Z0-9_+\-]*)\n(.*?)```", re.DOTALL)
 
-# Canonical names the UI knows how to render a Run button for. The actual
-# gate is executor.available_languages — this set is only the fallback
-# when the executor can't tell us (degraded mode / older interface).
-_RUNNABLE_FALLBACK = frozenset({"python", "javascript", "bash"})
+# Add 'sql' to the fallback set
+_RUNNABLE_FALLBACK = frozenset({"python", "javascript", "bash", "sql"})
 
-
-# ── Reply parsing ──────────────────────────────────
 
 def render_reply_controls(
     markdown_text: str,
@@ -41,17 +20,9 @@ def render_reply_controls(
     message_id: str,
     show_run: bool = False,
 ) -> None:
-    """Parse fenced code blocks in an assistant reply and add Run buttons.
-
-    ``message_id``   — unique per assistant message (stable button keys).
-    ``show_run``     — if False, no Run buttons are rendered at all.
-                       Set to True only for generated code responses.
-    """
     if not show_run or not markdown_text or executor is None:
         return
 
-    # Ask the executor which languages it can actually run. If it can't
-    # tell us, fall back to the conservative default set.
     available = getattr(executor, "available_languages", None) or _RUNNABLE_FALLBACK
 
     matches = list(_CODE_FENCE.finditer(markdown_text))
@@ -72,8 +43,6 @@ def render_reply_controls(
         )
 
 
-# ── Run controls ───────────────────────────────────
-
 def render_run_controls(
     code: str,
     language: str,
@@ -83,7 +52,6 @@ def render_run_controls(
     label: str | None = None,
     snippet_id: str,
 ) -> None:
-    """Render a Run button with a STABLE key. Executes the code as-is."""
     if not runnable:
         return
 
@@ -122,14 +90,11 @@ def render_run_controls(
         _render_result(stored)
 
 
-# ── Internals ──────────────────────────────────────
-
 def _normalize_language(lang: str) -> str:
-    return {"py": "python", "js": "javascript", "sh": "bash"}.get(lang, lang)
+    return {"py": "python", "js": "javascript", "sh": "bash", "sqlite": "sql"}.get(lang, lang)
 
 
 def _infer_language(lang: str, code: str) -> str:
-    """Best-effort language detection when the fence tag is missing."""
     if lang:
         return lang
     if re.search(r"^\s*(def |class |import |from |async def )", code, re.M):
@@ -140,6 +105,9 @@ def _infer_language(lang: str, code: str) -> str:
         return "javascript"
     if re.search(r"^\s*(#!|echo |\$ )", code, re.M):
         return "bash"
+    # Basic heuristic for SQL
+    if re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b", code, re.I):
+        return "sql"
     return ""
 
 
@@ -153,6 +121,7 @@ def _render_result(result: ExecutionResult) -> None:
 
     if result.stdout:
         st.markdown("**stdout**")
+        # Render SQL output as text (since it's tabular)
         st.code(result.stdout, language="text")
     if result.stderr:
         st.markdown("**stderr**")

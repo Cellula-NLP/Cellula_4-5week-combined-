@@ -1,4 +1,4 @@
-"""Ingest user-provided solutions into the vector store (human feedback learning)."""
+"""Ingest solutions (from Tavily or users) into the vector store."""
 from __future__ import annotations
 
 import hashlib
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class IngestionService:
-    """Chunk → embed → upsert user solutions with deduplication."""
+    """Chunk → embed → upsert solutions with deduplication."""
 
     def __init__(
         self,
@@ -26,20 +26,11 @@ class IngestionService:
         self._vdb = vectorstore
         self._chunker = chunker
 
-    # ── Public API ────────────────────────────────
-
     @staticmethod
     def hash_text(text: str) -> str:
-        """Compute the same content hash used by ingest_solution()."""
         return hashlib.sha256((text or "").strip().encode()).hexdigest()
 
     def is_duplicate(self, solution_text: str) -> bool:
-        """True if this exact solution is already stored in the KB.
-
-        Used by the orchestrator for an early check that works in any
-        FSM state — so pasting a solution twice gives "already have it"
-        instead of routing to explain.
-        """
         text = (solution_text or "").strip()
         if len(text) < 20:
             return False
@@ -71,10 +62,10 @@ class IngestionService:
 
             docs = [
                 RetrievedDoc(
-                    id=f"userfb:{content_hash}:{c.index}",
+                    id=f"web:{content_hash}:{c.index}",
                     content=c.text,
                     metadata={
-                        "source": "user_feedback",
+                        "source": "tavily_so", # Changed from user_feedback to tavily_so
                         "session_id": session_id,
                         "original_query": original_query,
                         "language": language or "unknown",
@@ -87,7 +78,7 @@ class IngestionService:
                 for c, v in zip(chunks, vectors)
             ]
             self._vdb.upsert(docs)
-            logger.info("Ingested %d chunks from user feedback.", len(docs))
+            logger.info("Ingested %d chunks from web search.", len(docs))
             return IngestResult(
                 True,
                 f"Learned {len(docs)} chunk(s) from your solution. Thanks!",

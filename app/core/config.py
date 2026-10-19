@@ -18,6 +18,8 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    tavily_api_key: str = ""
+
     # ── LLM ──────────────────────────────────────
     llm_provider: str = "groq"
     llm_model: str = "qwen/qwen3.8-27b"

@@ -48,7 +48,7 @@ class RelevanceEvaluator:
 
         # Shortcut 1 — user-feedback doc matching the current query.
         for d in docs:
-            if d.metadata.get("source") != "user_feedback":
+            if d.metadata.get("source") != "tavily_so":
                 continue
             original = (d.metadata.get("original_query") or "").strip()
             if original and queries_match(query, original):

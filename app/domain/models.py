@@ -16,11 +16,6 @@ def _utcnow() -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """A single conversation turn.
-
-    Accepts `role` as either a MessageRole enum or a plain string
-    ("user", "assistant", ...) and coerces it to the enum.
-    """
     role: MessageRole
     content: str
     created_at: datetime = field(default_factory=_utcnow)
@@ -57,6 +52,12 @@ class RetrievedDoc:
     metadata: dict[str, Any] = field(default_factory=dict)
     score: float = 0.0
     embedding: list[float] | None = None
+
+@dataclass(frozen=True, slots=True)
+class WebSearchResult:
+    title: str
+    url: str
+    content: str
 
 
 @dataclass(frozen=True, slots=True)

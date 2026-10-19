@@ -8,12 +8,11 @@ from app.domain.models import (
     ExecutionResult,
     Message,
     RetrievedDoc,
+    WebSearchResult,
 )
 
 
 class LLMProvider(ABC):
-    """Port for any chat-completion LLM."""
-
     @abstractmethod
     async def complete(
         self,
@@ -22,65 +21,47 @@ class LLMProvider(ABC):
         json_mode: bool = False,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Return a complete (non-streamed) response."""
+    ) -> str: ...
 
     @abstractmethod
     def stream(
-            self,
-            messages: Sequence[Message],
-            *,
-            temperature: float | None = None,
-            max_tokens: int | None = None,
-    ) -> AsyncIterator[str]:
-        """Yield response tokens as they arrive."""
+        self,
+        messages: Sequence[Message],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]: ...
 
 
 class EmbeddingProvider(ABC):
-    """Port for text embedding."""
+    @abstractmethod
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
 
     @abstractmethod
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed a batch of documents."""
-
-    @abstractmethod
-    def embed_query(self, text: str) -> list[float]:
-        """Embed a single query."""
+    def embed_query(self, text: str) -> list[float]: ...
 
     @property
     @abstractmethod
-    def dimension(self) -> int:
-        """Embedding vector dimension."""
+    def dimension(self) -> int: ...
 
 
 class VectorStore(ABC):
-    """Port for a vector database."""
-
     @abstractmethod
-    def upsert(self, docs: Sequence[RetrievedDoc]) -> list[str]:
-        """Insert or update documents. Returns their IDs."""
+    def upsert(self, docs: Sequence[RetrievedDoc]) -> list[str]: ...
 
     @abstractmethod
     def query(
-        self,
-        embedding: list[float],
-        top_k: int = 4,
-        filters: dict | None = None,
-    ) -> list[RetrievedDoc]:
-        """Return the top-k most similar documents."""
+        self, embedding: list[float], top_k: int = 4, filters: dict | None = None
+    ) -> list[RetrievedDoc]: ...
 
     @abstractmethod
-    def count(self) -> int:
-        """Total number of documents in the store."""
+    def count(self) -> int: ...
 
     @abstractmethod
-    def query_by_hash(self, content_hash: str) -> list[RetrievedDoc]:
-        """Find documents by content hash (deduplication)."""
+    def query_by_hash(self, content_hash: str) -> list[RetrievedDoc]: ...
 
 
 class CodeRunner(ABC):
-    """Port for sandboxed code execution."""
-
     @abstractmethod
     def run(
         self,
@@ -89,29 +70,28 @@ class CodeRunner(ABC):
         *,
         timeout_s: float | None = None,
         stdin: str = "",
-    ) -> ExecutionResult:
-        """Execute code and return the result."""
+    ) -> ExecutionResult: ...
 
 
 class MemoryStore(ABC):
-    """Port for conversation + profile persistence."""
+    @abstractmethod
+    def append(self, session_id: str, msg: Message) -> None: ...
 
     @abstractmethod
-    def append(self, session_id: str, msg: Message) -> None:
-        """Append a message to the session history."""
+    def history(self, session_id: str, limit: int | None = None) -> list[Message]: ...
 
     @abstractmethod
-    def history(self, session_id: str, limit: int | None = None) -> list[Message]:
-        """Return the most recent messages."""
+    def profile(self, session_id: str) -> dict: ...
 
     @abstractmethod
-    def profile(self, session_id: str) -> dict:
-        """Return the user profile for this session."""
+    def update_profile(self, session_id: str, patch: dict) -> None: ...
 
     @abstractmethod
-    def update_profile(self, session_id: str, patch: dict) -> None:
-        """Merge fields into the user profile."""
+    def clear(self, session_id: str) -> None: ...
+
+
+class WebSearchProvider(ABC):
+    """Port for searching the internet."""
 
     @abstractmethod
-    def clear(self, session_id: str) -> None:
-        """Delete all history and profile for a session."""
+    async def search(self, query: str, max_results: int = 3) -> list[WebSearchResult]: ...

@@ -22,7 +22,6 @@ class Relevance(str, Enum):
 class ConvState(str, Enum):
     """Conversation finite-state-machine states."""
     IDLE = "idle"
-    AWAITING_SOLUTION = "awaiting_solution"
     AWAITING_CLARIFICATION = "awaiting_clarification"
 
 

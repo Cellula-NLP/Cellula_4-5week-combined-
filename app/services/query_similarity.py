@@ -1,14 +1,10 @@
 """Shared query similarity helper.
 
 Used by:
-  • the retriever, to decide whether a user-feedback document's
-    ``original_query`` is close enough to the current request to be
-    force-included in the candidate set;
+  • the retriever, to decide whether a document's ``original_query``
+    is close enough to the current request to be force-included.
   • the relevance evaluator, to short-circuit an LLM call when a
-    matching user-feedback doc is already present.
-
-Kept in its own module so both callers share the exact same
-normalization + threshold logic.
+    matching document is already present.
 """
 from __future__ import annotations
 
