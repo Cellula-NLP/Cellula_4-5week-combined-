@@ -1,43 +1,53 @@
-"""Streamlit entrypoint — run with: streamlit run app/main.py"""
-import logging
+"""FastAPI Application Entry Point."""
 import os
-import sys
+# MUST BE AT THE VERY TOP
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Ensure sandbox subprocess doesn't try to fork HF tokenizers parallelism.
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+import torch
+# Force PyTorch to use 1 thread to prevent OpenMP crashes on Mac
+torch.set_num_threads(1)
 
+import logging
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.api.v1.router import api_router
+from app.core.config import get_settings
 
-def _configure_logging() -> None:
-    """Force INFO-level logging to reach the terminal.
+logging.basicConfig(level=logging.INFO)
+settings = get_settings()
 
-    Streamlit installs its own root handler at startup, so a bare
-    ``logging.basicConfig()`` is a no-op. We explicitly set the root
-    level and add a StreamHandler if one isn't already attached.
-    """
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
+app = FastAPI(
+    title=settings.project_name,
+    openapi_url=f"{settings.api_v1_str}/openapi.json",
+    description="Unified AI Backend: Code RAG + Voice Data Analyst"
+)
 
-    # Attach a stdout handler if the root logger has none.
-    has_stream = any(
-        isinstance(h, logging.StreamHandler)
-        for h in root.handlers
-    )
-    if not has_stream:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setLevel(logging.INFO)
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-        ))
-        root.addHandler(handler)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # Quiet down noisy third-party loggers we don't care about.
-    for noisy in ("httpx", "httpcore", "urllib3", "chromadb", "sentence_transformers"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+app.include_router(api_router, prefix=settings.api_v1_str)
 
+@app.get("/")
+def read_root():
+    return {
+        "message": "Welcome to the AI Backend API",
+        "documentation": "Go to /docs to see the interactive Swagger UI.",
+        "features": ["Code RAG", "Code Execution", "Voice Transcription", "Data Analysis"]
+    }
 
-_configure_logging()
-
-from app.ui.app import main  # noqa: E402
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "message": "API is running"}
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    # MUST BE reload=False to prevent child process OpenMP conflicts
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8080, reload=False)

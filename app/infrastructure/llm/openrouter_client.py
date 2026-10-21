@@ -1,5 +1,4 @@
-"""OpenRouter LLM client (OpenAI-compatible API).
-"""
+"""OpenRouter LLM client (OpenAI-compatible API)."""
 from __future__ import annotations
 
 import hashlib
@@ -17,21 +16,14 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from app.core.config import Settings
+from app.core.config import get_settings
 from app.core.exceptions import LLMError, RateLimitError, TimeoutError
-from app.domain.models import Message
 from app.domain.ports import LLMProvider
 
 logger = logging.getLogger(__name__)
 
-# Exceptions that justify a retry at the tenacity level.
 _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, RateLimitError)
-
-# The universal free-model fallback. OpenRouter routes to whatever free
-# model is available at request time.
 _FREE_ROUTER = "openrouter/free"
-
-# Maximum number of cached completions. Small enough to never be an issue.
 _DEFAULT_CACHE_SIZE = 256
 
 
@@ -40,12 +32,11 @@ class OpenRouterClient(LLMProvider):
 
     def __init__(
         self,
-        settings: Settings,
         *,
         cache_size: int = _DEFAULT_CACHE_SIZE,
         enable_cache: bool = True,
     ) -> None:
-        self._settings = settings
+        self._settings = get_settings()
         self._enable_cache = enable_cache
         self._cache: "OrderedDict[str, str]" = OrderedDict()
         self._cache_size = max(0, cache_size)
@@ -54,34 +45,31 @@ class OpenRouterClient(LLMProvider):
         self._cache_misses = 0
 
         self._client = httpx.AsyncClient(
-            base_url=settings.llm_base_url,
-            timeout=httpx.Timeout(settings.llm_timeout_s),
+            base_url=self._settings.llm_base_url,
+            timeout=httpx.Timeout(self._settings.llm_timeout_s),
             headers={
-                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Authorization": f"Bearer {self._settings.llm_api_key}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/ai-coding-assistant",
-                "X-Title": "AI Coding Assistant",
+                "X-Title": "Unified AI Backend",
             },
         )
 
     # ── Public API ────────────────────────────────
 
     async def complete(
-            self,
-            messages: Sequence[Message],
-            *,
-            json_mode: bool = False,
-            temperature: float | None = None,
-            max_tokens: int | None = None,
+        self,
+        messages: Sequence[dict],
+        *,
+        json_mode: bool = False,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """Non-streamed completion with cache + fallback chain."""
-        cache_key = self._make_cache_key(
-            messages, json_mode, temperature, max_tokens,
-        )
+        cache_key = self._make_cache_key(messages, json_mode, temperature, max_tokens)
         if cache_key is not None:
             cached = self._cache_get(cache_key)
             if cached is not None:
-                # Visible at INFO so users can verify caching in the terminal.
                 logger.info("LLM cache HIT (%d chars).", len(cached))
                 return cached
             logger.info("LLM cache MISS — will call model.")
@@ -103,7 +91,7 @@ class OpenRouterClient(LLMProvider):
 
     async def stream(
         self,
-        messages: Sequence[Message],
+        messages: Sequence[dict],
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -112,24 +100,15 @@ class OpenRouterClient(LLMProvider):
         last_exc: Exception | None = None
         for model in self._model_chain():
             try:
-                async for token in self._stream_once(
-                    model, messages, temperature, max_tokens,
-                ):
+                async for token in self._stream_once(model, messages, temperature, max_tokens):
                     yield token
                 return
-            except (
-                httpx.HTTPStatusError,
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                LLMError,
-            ) as exc:
+            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, LLMError) as exc:
                 logger.warning("Stream model %s failed: %s. Trying next…", model, exc)
                 last_exc = exc
-        raise LLMError(
-            f"All streaming models failed. Last error: {last_exc}"
-        ) from last_exc
+        raise LLMError(f"All streaming models failed. Last error: {last_exc}") from last_exc
 
-    # ── Cache API (exposed for debugging/monitoring) ──
+    # ── Cache API ──
 
     @property
     def cache_stats(self) -> dict:
@@ -150,17 +129,7 @@ class OpenRouterClient(LLMProvider):
     # ── Internals ─────────────────────────────────
 
     def _model_chain(self) -> list[str]:
-        """Ordered, de-duplicated list of models to try.
-
-        Adapts to the provider:
-          • If base_url points at Groq, we only use models that Groq hosts.
-          • Otherwise (OpenRouter, Together, etc.) we append the free router.
-        """
-        candidates = [
-            self._settings.llm_model,
-            self._settings.llm_fallback_model,
-        ]
-
+        candidates = [self._settings.llm_model, self._settings.llm_fallback_model]
         base = self._settings.llm_base_url.lower()
         if "groq.com" not in base:
             candidates.append(_FREE_ROUTER)
@@ -173,32 +142,21 @@ class OpenRouterClient(LLMProvider):
                 chain.append(m)
         return chain
 
-    # ── Cache helpers ─────────────────────────────
-
     def _make_cache_key(
         self,
-        messages: Sequence[Message],
+        messages: Sequence[dict],
         json_mode: bool,
         temperature: float | None,
         max_tokens: int | None,
     ) -> str | None:
-        """Deterministic hash of all inputs that affect the response.
-
-        Returns None if caching is disabled.
-        """
         if not self._enable_cache or self._cache_size == 0:
             return None
         try:
             payload = {
                 "chain": self._model_chain(),
-                "messages": [
-                    {"role": m.role.value, "content": m.content} for m in messages
-                ],
+                "messages": messages,  # Now directly serializable!
                 "json_mode": json_mode,
-                "temperature": (
-                    temperature if temperature is not None
-                    else self._settings.llm_temperature
-                ),
+                "temperature": temperature if temperature is not None else self._settings.llm_temperature,
                 "max_tokens": max_tokens,
             }
             encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -210,7 +168,6 @@ class OpenRouterClient(LLMProvider):
     def _cache_get(self, key: str) -> str | None:
         with self._cache_lock:
             if key in self._cache:
-                # Move to end → marks as recently used.
                 self._cache.move_to_end(key)
                 self._cache_hits += 1
                 return self._cache[key]
@@ -224,25 +181,14 @@ class OpenRouterClient(LLMProvider):
                 self._cache[key] = value
                 return
             self._cache[key] = value
-            # Evict least-recently-used entry if over capacity.
             while len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
 
     # ── Network helpers ───────────────────────────
 
-    @retry(
-        retry=retry_if_exception_type(_RETRYABLE),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=1, max=10),
-        reraise=True,
-    )
+    @retry(retry=retry_if_exception_type(_RETRYABLE), stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=1, max=10), reraise=True)
     async def _complete_once(
-        self,
-        model: str,
-        messages: Sequence[Message],
-        json_mode: bool,
-        temperature: float | None,
-        max_tokens: int | None,
+        self, model: str, messages: Sequence[dict], json_mode: bool, temperature: float | None, max_tokens: int | None
     ) -> str:
         body = self._build_body(model, messages, temperature, max_tokens)
         if json_mode:
@@ -254,35 +200,20 @@ class OpenRouterClient(LLMProvider):
             raise RateLimitError(f"Rate limit hit for {model}")
         if resp.status_code >= 500:
             raise LLMError(f"Server error {resp.status_code} for {model}")
-        if resp.status_code >= 400:
-            try:
-                err_body = resp.json()
-            except Exception:
-                err_body = resp.text
-            logger.error("HTTP %s from %s: %s", resp.status_code, model, err_body)
         resp.raise_for_status()
 
         data = resp.json()
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as exc:
-            raise LLMError(
-                f"Unexpected response shape for {model}: {data}"
-            ) from exc
+            raise LLMError(f"Unexpected response shape for {model}") from exc
 
-        # Some OpenRouter free-tier models return None content alongside a
-        # valid finish_reason. Treat it as a transient failure so the
-        # fallback chain can try the next model.
         if content is None or not content.strip():
             raise LLMError(f"Empty content from {model}")
         return content
 
     async def _stream_once(
-        self,
-        model: str,
-        messages: Sequence[Message],
-        temperature: float | None,
-        max_tokens: int | None,
+        self, model: str, messages: Sequence[dict], temperature: float | None, max_tokens: int | None
     ) -> AsyncIterator[str]:
         body = self._build_body(model, messages, temperature, max_tokens)
         body["stream"] = True
@@ -292,12 +223,6 @@ class OpenRouterClient(LLMProvider):
                 raise RateLimitError(f"Rate limit hit for {model}")
             if resp.status_code >= 500:
                 raise LLMError(f"Server error {resp.status_code} for {model}")
-            if resp.status_code >= 400:
-                try:
-                    err_body = resp.json()
-                except Exception:
-                    err_body = resp.text
-                logger.error("HTTP %s from %s: %s", resp.status_code, model, err_body)
             resp.raise_for_status()
 
             async for line in resp.aiter_lines():
@@ -313,25 +238,15 @@ class OpenRouterClient(LLMProvider):
                     if content:
                         yield content
                 except (json.JSONDecodeError, KeyError, IndexError):
-                    # Ignore malformed SSE chunks; keep streaming.
                     continue
 
     def _build_body(
-        self,
-        model: str,
-        messages: Sequence[Message],
-        temperature: float | None,
-        max_tokens: int | None,
+        self, model: str, messages: Sequence[dict], temperature: float | None, max_tokens: int | None
     ) -> dict:
         return {
             "model": model,
-            "messages": [
-                {"role": m.role.value, "content": m.content} for m in messages
-            ],
-            "temperature": (
-                temperature if temperature is not None
-                else self._settings.llm_temperature
-            ),
+            "messages": messages,  # Standard dict format
+            "temperature": temperature if temperature is not None else self._settings.llm_temperature,
             "max_tokens": max_tokens,
         }
 

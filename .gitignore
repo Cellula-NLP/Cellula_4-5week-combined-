@@ -222,7 +222,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
+data
 data/chroma/
 data/sessions.db
 data/uploads/

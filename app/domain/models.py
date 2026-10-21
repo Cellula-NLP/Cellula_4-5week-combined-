@@ -1,19 +1,14 @@
-"""Immutable domain models used by services and pipelines."""
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-
-from app.domain.enums import Intent, MessageRole, Relevance
-
+from pydantic import BaseModel, Field
+from app.domain.enums import Relevance, MessageRole
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-# ── Conversation ──────────────────────────────────
-
+# ── RAG Code Models ──
 @dataclass(frozen=True, slots=True)
 class Message:
     role: MessageRole
@@ -22,6 +17,7 @@ class Message:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Coerce plain strings into MessageRole enums automatically."""
         if not isinstance(self.role, MessageRole):
             try:
                 object.__setattr__(self, "role", MessageRole(str(self.role).lower()))
@@ -31,19 +27,13 @@ class Message:
                     f"Expected one of: {[r.value for r in MessageRole]}"
                 ) from None
 
-
-# ── Classification ────────────────────────────────
-
 @dataclass(frozen=True, slots=True)
 class Classification:
-    intent: Intent
+    intent: str
     confidence: float
     language: str | None = None
     extracted_code: str | None = None
     reasoning: str = ""
-
-
-# ── Retrieval ─────────────────────────────────────
 
 @dataclass(frozen=True, slots=True)
 class RetrievedDoc:
@@ -59,16 +49,6 @@ class WebSearchResult:
     url: str
     content: str
 
-
-@dataclass(frozen=True, slots=True)
-class Verdict:
-    relevance: Relevance
-    score: float
-    reason: str = ""
-
-
-# ── Execution ─────────────────────────────────────
-
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
     ok: bool
@@ -78,17 +58,17 @@ class ExecutionResult:
     duration_ms: int
     timed_out: bool = False
 
-
-# ── Ingestion ─────────────────────────────────────
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    relevance: Relevance
+    score: float
+    reason: str = ""
 
 @dataclass(frozen=True, slots=True)
 class IngestResult:
     success: bool
     message: str
     chunks_ingested: int = 0
-
-
-# ── Streaming ─────────────────────────────────────
 
 @dataclass(frozen=True, slots=True)
 class StreamEvent:
@@ -104,17 +84,50 @@ class StreamEvent:
         return cls("message", text)
 
     @classmethod
-    def meta(cls, data: dict) -> "StreamEvent":
-        return cls("meta", data)
-
-    @classmethod
-    def state_change(cls, state: str) -> "StreamEvent":
-        return cls("state_change", state)
-
-    @classmethod
-    def error(cls, text: str) -> "StreamEvent":
-        return cls("error", text)
-
-    @classmethod
     def done(cls) -> "StreamEvent":
         return cls("done", None)
+
+# ── Voice/SQL Models ──
+class ColumnSchema(BaseModel):
+    name: str
+    type: str
+
+# ── API Request/Response Models ──
+class CodeGenerateRequest(BaseModel):
+    session_id: str = Field(..., description="Unique chat session ID")
+    query: str = Field(..., description="The user's prompt")
+
+class CodeGenerateResponse(BaseModel):
+    generated_text: str = Field(..., description="The Markdown response containing the code")
+
+class CodeExplainRequest(BaseModel):
+    session_id: str = Field(..., description="Unique chat session ID")
+    code: str
+    query: str = "Explain this code."
+
+class CodeExplainResponse(BaseModel):
+    explanation: str
+
+class CodeExecuteRequest(BaseModel):
+    code: str
+    language: str = Field(..., description="python, javascript, bash, or sql")
+
+class TranscriptionResponse(BaseModel):
+    transcript: str
+    detected_language: str
+
+class DatasetUploadResponse(BaseModel):
+    filename: str
+    table_name: str
+    row_count: int
+    columns: list[ColumnSchema]
+
+class AnalyzeRequest(BaseModel):
+    dataset_name: str
+    user_text: str
+
+class AnalyzeResponse(BaseModel):
+    user_text: str
+    generated_sql: str
+    result_data: list[dict[str, Any]]
+    explanation: str
