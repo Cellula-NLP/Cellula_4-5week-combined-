@@ -1,4 +1,4 @@
-# 🚀 Unified AI Backend
+#  AI Backend
 
 An intelligent, production-grade AI backend built with **FastAPI**, serving two distinct capabilities via a single API:
 1. **AI Coding Assistant (RAG):** Explains code, generates code using a Chroma Vector DB, autonomously searches Stack Overflow for missing knowledge (via Tavily), and securely executes code in a sandbox.
